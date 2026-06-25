@@ -154,6 +154,7 @@ Visual gate (run manually): dev server → AppShell renders with 220px sidebar, 
 
 ## Phase 1 — Identity, Auth, Setup, Admin
 
+
 ### C1.1 — Identity schema
 **Status:** ✅ GREEN
 
@@ -183,4 +184,47 @@ Visual gate (run manually): dev server → AppShell renders with 220px sidebar, 
 17/17 identity-schema tests GREEN
 41/41 total backend tests GREEN (5 suites: smoke, config, db, identity-schema, server)
 Verified: admin=16 flags, editor=10 (no users/roles/settings/api_keys/vault.manage_access/audit.read), viewer_secrets=4, viewer=2
+```
+
+---
+
+### C1.2 — Self-auth + RBAC
+**Status:** ✅ GREEN
+
+**Built:**
+- `backend/src/auth/types.ts` — `AuthIdentity` interface.
+- `backend/src/auth/self.ts` — `hashPassword` (Argon2id via `@node-rs/argon2`), `authenticateSelf` (timing-safe enumeration prevention; status checked before verify; Promise singleton dummy hash), `resolvePermissions` (UNION/EXCEPT SQL for role + per-user overrides).
+- `backend/src/middleware/session.ts` — `createSessionMiddleware` (httpOnly, sameSite=lax, 8h maxAge, named `biro.sid`); `SessionData` module augmentation; MemoryStore warning in production.
+- `backend/src/middleware/rbac.ts` — `requireAuth` (401), `requirePermission(flag)` (401 if no session, 403 if missing flag).
+- `backend/src/routes/auth.ts` — `authRouter(pool)`: POST /auth/login (session fixation prevented via `session.regenerate()`), POST /auth/logout (destroys session + clears cookie), GET /auth/me.
+- `backend/src/server.ts` (updated) — `createApp(opts?)` wires session + auth routes when opts provided; unit tests still call `createApp()` without opts.
+- `backend/src/__tests__/auth.test.ts` — 12 integration tests.
+
+**Files touched:**
+- `backend/src/auth/types.ts` (new)
+- `backend/src/auth/self.ts` (new)
+- `backend/src/middleware/session.ts` (new)
+- `backend/src/middleware/rbac.ts` (new)
+- `backend/src/routes/auth.ts` (new)
+- `backend/src/server.ts` (updated)
+- `backend/src/__tests__/auth.test.ts` (new)
+- `backend/package.json` (deps: @node-rs/argon2, express-session)
+
+**Decisions/deviations:**
+- `@node-rs/argon2` used instead of `argon2` (the latter requires native compilation that fails on Windows paths with `&`). `@node-rs/argon2` ships prebuilt NAPI binaries. Default type is Argon2id — matches §6.3.
+- Session fixation prevention: `req.session.regenerate()` called on every successful login.
+- Logout: `res.clearCookie('biro.sid')` clears client cookie even though server session is destroyed.
+- email.trim() moved inside `authenticateSelf` so all callers get consistent behavior.
+- MemoryStore: intentional for C1.2; replaced with persistent store in P9.
+- CORS remains open for dev; lock to known origin before any production deployment.
+
+**Gate result:**
+```
+12/12 auth tests GREEN (login, logout, /me, RBAC 200/403/401, hash format)
+53/53 total backend tests GREEN (6 suites)
+Login issues httpOnly session cookie ✓
+RBAC: viewer→infra.read=200, viewer→users.manage=403, admin→users.manage=200 ✓
+Unauthenticated→guarded route=401 (not 403) ✓
+password_hash never leaked in any response ✓
+Argon2id hash format ($argon2id$) verified in DB ✓
 ```

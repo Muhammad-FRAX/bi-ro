@@ -4,17 +4,27 @@ import cors from 'cors'
 import dotenv from 'dotenv'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
+import type { Pool } from 'pg'
 import { requestId } from './middleware/requestId.ts'
 import { errorHandler } from './middleware/errorHandler.ts'
+import { createSessionMiddleware } from './middleware/session.ts'
 import healthRouter from './routes/health.ts'
+import { authRouter } from './routes/auth.ts'
 import { initConfig, getConfig } from './config.ts'
 import { runMigrations } from './db/migrate.ts'
-import { initPool } from './db/pool.ts'
+import { initPool, getPool } from './db/pool.ts'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
-export function createApp(): express.Express {
+interface AppOptions {
+  pool: Pool
+  sessionSecret: string
+  secureCookie?: boolean
+}
+
+// createApp: accepts optional opts. When omitted (unit tests), auth middleware is skipped.
+export function createApp(opts?: AppOptions): express.Express {
   const app = express()
 
   app.use(helmet())
@@ -22,6 +32,11 @@ export function createApp(): express.Express {
   app.use(requestId)
   app.use(express.json())
   app.use(express.urlencoded({ extended: true }))
+
+  if (opts) {
+    app.use(createSessionMiddleware({ secret: opts.sessionSecret, secure: opts.secureCookie }))
+    app.use('/api', authRouter(opts.pool))
+  }
 
   app.use('/api', healthRouter)
 
@@ -42,7 +57,12 @@ async function main(): Promise<void> {
   await runMigrations(cfg.databaseUrl)
   initPool(cfg.databaseUrl)
 
-  const app = createApp()
+  const app = createApp({
+    pool: getPool(),
+    sessionSecret: cfg.sessionSecret,
+    secureCookie: cfg.nodeEnv === 'production',
+  })
+
   app.listen(cfg.port, () => {
     process.stdout.write(`[server] listening on :${cfg.port}\n`)
   })
