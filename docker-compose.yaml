@@ -8,8 +8,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-biro_dev_password_change_in_prod}
     volumes:
       - bi-ro-db-data:/var/lib/postgresql/data
-    ports:
-      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U biro -d biro"]
       interval: 10s
