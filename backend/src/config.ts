@@ -72,7 +72,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     toJSON() {
       return {
         authMode: this.authMode,
-        databaseUrl: this.databaseUrl,
+        databaseUrl: this.databaseUrl.replace(/:([^:@]+)@/, ':***@'),
         port: this.port,
         nodeEnv: this.nodeEnv,
         appTitle: this.appTitle,

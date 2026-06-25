@@ -75,13 +75,15 @@ describe('loadConfig', () => {
     expect(() => loadConfig(env)).toThrow(/SESSION_SECRET/)
   })
 
-  it('redacts KEK and sessionSecret in toJSON output', () => {
+  it('redacts KEK, sessionSecret, and databaseUrl password in toJSON output', () => {
     const cfg = loadConfig(validEnv)
     const json = JSON.stringify(cfg)
     const parsed = JSON.parse(json)
     expect(parsed.kek).toBe('[REDACTED]')
     expect(parsed.sessionSecret).toBe('[REDACTED]')
     expect(parsed.authMode).toBe('self')
+    expect(parsed.databaseUrl).not.toContain('pass')
+    expect(parsed.databaseUrl).toContain('***')
   })
 })
 

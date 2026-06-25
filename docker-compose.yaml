@@ -1,0 +1,63 @@
+services:
+  bi-ro-db:
+    image: postgres:16-alpine
+    container_name: bi-ro-db
+    environment:
+      POSTGRES_DB: biro
+      POSTGRES_USER: biro
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-biro_dev_password_change_in_prod}
+    volumes:
+      - bi-ro-db-data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U biro -d biro"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  bi-ro:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bi-ro
+    depends_on:
+      bi-ro-db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://biro:${POSTGRES_PASSWORD:-biro_dev_password_change_in_prod}@bi-ro-db:5432/biro
+      AUTH_MODE: ${AUTH_MODE:-self}
+      BIRO_MASTER_KEK: ${BIRO_MASTER_KEK}
+      SESSION_SECRET: ${SESSION_SECRET}
+      APP_TITLE: ${APP_TITLE:-BI Root}
+      APP_ACCENT: ${APP_ACCENT:-#a78bfa}
+      BIRO_ADMIN_EMAIL: ${BIRO_ADMIN_EMAIL:-}
+      BIRO_ADMIN_PASSWORD: ${BIRO_ADMIN_PASSWORD:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_TLS: ${SMTP_TLS:-true}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      EXPIRY_THRESHOLDS: ${EXPIRY_THRESHOLDS:-7,2,0}
+      PORT: 5000
+    volumes:
+      - bi-ro-uploads:/app/uploads
+    ports:
+      - "5000:5000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+volumes:
+  bi-ro-db-data:
+    name: bi-ro-db-data
+  bi-ro-uploads:
+    name: bi-ro-uploads
