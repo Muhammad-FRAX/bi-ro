@@ -149,3 +149,38 @@ npm run build: ✓ 36 modules, 6.19kB CSS (Tailwind + tokens), 200kB JS
 CSS output contains: --btn-h:30px, [data-theme=light] overrides, all §10 tokens
 Visual gate (run manually): dev server → AppShell renders with 220px sidebar, 48px topbar, theme toggle switches dark/light; btn height 30px confirmed via CSS vars
 ```
+
+---
+
+## Phase 1 — Identity, Auth, Setup, Admin
+
+### C1.1 — Identity schema
+**Status:** ✅ GREEN
+
+**Built:**
+- `backend/migrations/0002_identity.sql` — creates `users`, `roles`, `role_permissions`, `user_roles`, `user_permission_overrides`, `settings`, `setup_state`; seeds 4 built-in roles (admin/editor/viewer_secrets/viewer) with their full permission flag sets per §3; idempotent throughout (IF NOT EXISTS + ON CONFLICT).
+- `backend/src/__tests__/identity-schema.test.ts` — 17-test integration suite: verifies all tables exist, users columns correct, built-in roles seeded with exact flag sets (admin=16, editor=10 with no admin powers, viewer_secrets=4, viewer=2).
+- `backend/src/__tests__/testSetup.ts` — vitest setupFiles entry calling `dotenv.config()` so DATABASE_URL loads before integration tests.
+- `backend/vitest.config.ts` — added `setupFiles: ['./src/__tests__/testSetup.ts']`.
+- `backend/src/db/migrate.ts` — filtered "Can't determine timestamp" log noise from node-pg-migrate with sequential filenames.
+
+**Files touched:**
+- `backend/migrations/0002_identity.sql` (new)
+- `backend/src/__tests__/identity-schema.test.ts` (new)
+- `backend/src/__tests__/testSetup.ts` (new)
+- `backend/vitest.config.ts` (updated)
+- `backend/src/db/migrate.ts` (updated)
+
+**Decisions/deviations:**
+- `email` uniqueness is a partial unique index (`WHERE deleted_at IS NULL`) instead of a table-level UNIQUE constraint — allows email reuse after soft-delete (P9 concern, but schema is correct from day one).
+- `setup_state.auth_mode` has the same CHECK constraint as `users.auth_mode` but is nullable (NULL until the setup wizard runs); documented inline.
+- `ON CONFLICT (name) DO UPDATE SET is_builtin = TRUE` on role seeds allows description to be customized in DB without being overwritten on re-run (intentional).
+- Indexes added: `user_roles_role_id_idx` (reverse role→users), `role_permissions_permission_idx` (perm→roles), `users_email_uq` partial index.
+- editor role explicitly lacks `vault.manage_access` and `audit.read` (asserted in tests).
+
+**Gate result:**
+```
+17/17 identity-schema tests GREEN
+41/41 total backend tests GREEN (5 suites: smoke, config, db, identity-schema, server)
+Verified: admin=16 flags, editor=10 (no users/roles/settings/api_keys/vault.manage_access/audit.read), viewer_secrets=4, viewer=2
+```

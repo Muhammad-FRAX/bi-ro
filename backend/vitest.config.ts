@@ -5,6 +5,7 @@ export default defineConfig({
     environment: 'node',
     pool: 'vmThreads',
     env: { NODE_ENV: 'test' },
+    setupFiles: ['./src/__tests__/testSetup.ts'],
     include: ['src/**/*.test.ts'],
     coverage: {
       provider: 'v8',

@@ -14,9 +14,8 @@ export async function runMigrations(databaseUrl: string): Promise<void> {
     direction: 'up',
     migrationsTable: 'pgmigrations',
     log: (msg: string) => {
-      if (!msg.includes('No migrations to run')) {
-        process.stdout.write(`[migrate] ${msg}\n`)
-      }
+      if (msg.includes('No migrations to run') || msg.includes("Can't determine timestamp")) return
+      process.stdout.write(`[migrate] ${msg}\n`)
     },
   })
 }
