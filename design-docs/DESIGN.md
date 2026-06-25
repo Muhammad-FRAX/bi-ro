@@ -634,9 +634,12 @@ logic. Repositories wrap raw SQL behind named functions.
 ## 10. Frontend design system
 
 Per the brief: **modern, smooth, professional. Dark by default, light available,
-purple accent, small controls, readable but not chunky.** Tailwind utilities +
-shadcn/ui components (copied into `frontend/src/components/ui/`, themable),
-`class-variance-authority` for variants, `next-themes`-style toggle.
+purple accent, small controls, readable but not chunky.** **Tailwind CSS** (utility
+layer, with the tokens below wired as CSS variables) + **shadcn/ui** components
+(copied into `frontend/src/components/ui/`, themable), `class-variance-authority`
+for variants, `next-themes`-style toggle. **Icons: `lucide-react`** (shadcn/ui's
+default set) — consistent stroke weight, tree-shakeable, sized to the control scale
+(14–16px in compact rows). Use lucide for all icons; no emoji, no mixed icon sets.
 
 **Tokens (dark root):**
 
