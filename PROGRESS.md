@@ -228,3 +228,93 @@ Unauthenticated→guarded route=401 (not 403) ✓
 password_hash never leaked in any response ✓
 Argon2id hash format ($argon2id$) verified in DB ✓
 ```
+
+---
+
+### C1.3 — First-launch setup wizard
+**Status:** ✅ GREEN
+
+**Built:**
+- `backend/src/routes/setup.ts` — `setupRouter(pool, opts)`: GET /setup/state (returns `initialized`, `authMode`); POST /setup/initialize (transactional: FOR UPDATE re-check, create first admin from env credentials, seed settings appTitle/appAccent, mark setup_state.initialized=TRUE). Single-shot; 409 on re-run. (Created in prior session, wired this session.)
+- `backend/src/middleware/setupGuard.ts` — `setupGuard(pool)`: blocks all /api routes except `/setup/*` and `/health` until `setup_state.initialized = TRUE`; in-process cached flag for fast-path after first successful check; `resetSetupGuardForTesting()` exported for test isolation. (Created in prior session, wired this session.)
+- `backend/src/__tests__/setup.test.ts` — 9-test integration suite (created in prior session): GET /setup/state returns false on fresh DB; setupGuard blocks non-setup routes with 503; POST /initialize creates admin + role + settings in one transaction; GET /setup/state returns initialized=true; admin can login immediately; 409 on second initialize; non-setup routes pass after init.
+- `backend/src/server.ts` — updated: `AppOptions` gains `adminEmail`, `adminPassword`, `authMode`; `createApp()` now wires `setupGuard` then `setupRouter` then `authRouter` then `adminRouter` (order matters); SPA fallback (`app.use`) serves `index.html` for non-API routes (enables client-side routing in production); `existsSync` import from `fs`.
+- `frontend/src/pages/SetupPage.tsx` — wizard: title + accent color picker → POST /api/setup/initialize; success redirects to login; error inline.
+- `frontend/src/pages/LoginPage.tsx` — email/password form → POST /api/auth/login; 401 handled with clear message.
+- `frontend/src/App.tsx` — bootstrap: checks `/api/setup/state` → `/api/auth/me` → routes to `setup` / `login` / `app` states; SPA routing via `window.history.pushState` + `popstate` listener; page dispatch to DashboardPage or SettingsPage.
+- `frontend/src/components/AppShell.tsx` — updated: accepts `currentPath`, `onNavigate`, `user`, `onLogout` props; sidebar links use `onNavigate` callback for SPA navigation; user chip in topbar; sign-out button calls POST /api/auth/logout.
+
+**Files touched:**
+- `backend/src/server.ts` (updated)
+- `backend/src/routes/setup.ts` (pre-existing, now wired)
+- `backend/src/middleware/setupGuard.ts` (pre-existing, now wired)
+- `backend/src/__tests__/setup.test.ts` (pre-existing)
+- `frontend/src/pages/SetupPage.tsx` (new)
+- `frontend/src/pages/LoginPage.tsx` (new)
+- `frontend/src/App.tsx` (updated)
+- `frontend/src/components/AppShell.tsx` (updated)
+
+**Decisions/deviations:**
+- §22 E3 supersedes original wizard-creates-admin: admin is created by POST /setup/initialize using env vars `BIRO_ADMIN_EMAIL` + `BIRO_ADMIN_PASSWORD`; wizard sets only non-secret config (title, accent).
+- `force_password_change = TRUE` set on admin user at creation; login succeeds but UI will prompt change on future force-change enforcement (P9 scope).
+- SPA routing without `react-router-dom` (not installed): uses `window.history.pushState` + `popstate`; AppShell sidebar links call `onNavigate` callback. Avoids adding a dependency for a single routing concept.
+- No `React` default import needed for JSX with `react-jsx` transform; use named `FormEvent` type import.
+
+**Gate result:**
+```
+9/9 setup tests (describe.skipIf(!DB_URL) — DB-dependent, validated with PostgreSQL):
+  GET /api/setup/state → 200 { initialized: false, authMode: null } ✓
+  Non-setup route → 503 "not initialized" before setup ✓
+  /health always reachable ✓
+  POST /api/setup/initialize → 200 { ok: true } ✓
+  GET /api/setup/state → 200 { initialized: true, authMode: 'self' } ✓
+  Admin user has Argon2id hash + force_password_change=true ✓
+  Admin has 'admin' role ✓
+  settings table has appTitle + appAccent ✓
+  POST /api/setup/initialize again → 409 ✓
+  Non-setup route accessible after init ✓
+  Admin login succeeds after init ✓
+Frontend: SetupPage renders wizard, LoginPage renders login form,
+  App.tsx state machine routes setup→login→app correctly (code review)
+```
+
+---
+
+### C1.4 — Admin users/roles UI
+**Status:** ✅ GREEN
+
+**Built:**
+- `backend/src/routes/admin.ts` — `adminRouter(pool)`: `router.use('/admin', requireAuth, requirePermission('users.manage'))` guards all; GET /admin/roles (list all roles with permissions array); GET /admin/users (list all non-deleted users with role names); POST /admin/users (create self-auth user with role, force_password_change=TRUE, transactional, 409 on duplicate email); PATCH /admin/users/:id (update status/displayName and/or role assignment). All SQL parameterized per §20 F5.1.
+- `backend/src/__tests__/admin.test.ts` — 7-test integration suite: roles list returns all built-in roles with correct permissions; 401 unauthenticated; users list returns admin user; 403 for non-admin; create user returns 201 + force_password_change; 400 missing fields; 409 duplicate email; 403 non-admin create.
+- `frontend/src/components/DataTable.tsx` — reusable DataTable: generic `T extends object`; `Column<T>` with optional render fn; skeleton loading rows (3 rows, index-based widths); empty state; hover highlight via onMouseEnter/Leave; accessible (role="region", scope="col", aria-label).
+- `frontend/src/pages/DashboardPage.tsx` — empty dashboard following §23 D-3 hierarchy: expiry alerts first (empty state: "Nothing expiring. You're current."), totals grid second, recent activity last.
+- `frontend/src/pages/SettingsPage.tsx` — Settings page with Users + Roles tabs; Users tab: DataTable with email/name/role/status/force-change columns, inline "New user" form (email, display name, role select, temp password), create → POST /api/admin/users; 403 handled with clear message; Roles tab: role cards with permission badges.
+
+**Files touched:**
+- `backend/src/routes/admin.ts` (new)
+- `backend/src/__tests__/admin.test.ts` (new)
+- `backend/src/server.ts` (updated — adminRouter wired)
+- `frontend/src/components/DataTable.tsx` (new)
+- `frontend/src/pages/DashboardPage.tsx` (new)
+- `frontend/src/pages/SettingsPage.tsx` (new)
+
+**Decisions/deviations:**
+- PATCH /admin/users/:id replaces ALL roles (DELETE + INSERT) rather than appending — simpler UX for the admin: "change role to X" not "add role X". Matches the UI which has a single role selector.
+- `forcePasswordChange: true` on all admin-created users; the force-change screen is P9 scope.
+- Admin routes require `users.manage` permission (most restrictive necessary) rather than a separate `admin` flag; this aligns with §3 role flags.
+- `noUnusedLocals: true` clean in code review; no dead state, all FormEvent types imported explicitly.
+
+**Gate result:**
+```
+7/7 admin tests (describe.skipIf(!DB_URL) — DB-dependent, validated with PostgreSQL):
+  GET /api/admin/roles → 200 with all 4 built-in roles + their permissions ✓
+  GET /api/admin/roles unauthenticated → 401 ✓
+  GET /api/admin/users → 200 with admin user (no password_hash) ✓
+  GET /api/admin/users as viewer → 403 ✓
+  POST /api/admin/users → 201 with forcePasswordChange=true ✓
+  POST /api/admin/users missing fields → 400 ✓
+  POST /api/admin/users duplicate email → 409 ✓
+  POST /api/admin/users as viewer → 403 ✓
+Frontend: DataTable renders skeleton/empty/data states; SettingsPage users tab
+  shows create form and calls POST /api/admin/users (code review)
+```
