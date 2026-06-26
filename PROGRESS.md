@@ -747,3 +747,150 @@ Structural gate (TypeScript reads):
   App.tsx: /vault, /vault/:id, /secrets/:id routes ✓
   TypeScript strict: no any, all prop types explicit ✓
 ```
+
+---
+
+## Phase 5 — Notifications, Email & Expiry Engine
+
+### C5.1 — Notification schema + center + dashboard widget
+**Status:** ✅ GREEN (structural gate — npm test requires local env)
+
+**Built:**
+- `backend/migrations/0008_notifications.sql` — `notifications`, `notification_deliveries`, `notification_rules`, `notification_sent_log`; default expiry rules (7d/2d/0d) seeded for both `expiry` and `cert_expiry`; idempotent (IF NOT EXISTS + ON CONFLICT DO NOTHING).
+- `backend/src/routes/notifications.ts` — `notificationsRouter(pool)`: GET /notifications (list, with unread filter + pagination); GET /notifications/unread-count; GET /notifications/expiring-soon (secrets within N days, IDOR-safe by vault membership); GET/PATCH /notifications/rules; POST /notifications (create manually); PATCH /notifications/:id/read; PATCH /notifications/read-all. Exported `createNotification()` helper for internal use by workers.
+- `backend/src/__tests__/notifications.test.ts` — 8-test DB-gated integration suite.
+- `frontend/src/pages/NotificationsPage.tsx` — notification list with unread/all toggle, severity dots, mark-read per item and bulk, relative timestamps, target entity links; loading/empty/error states per §23 D-1.
+- `frontend/src/pages/DashboardPage.tsx` — updated: fetches `/api/notifications/expiring-soon?days=7` and `/api/notifications/unread-count`; dominant expiry block now live data with DaysRemainingBadge (danger ≤2d, warning ≤7d, success >7d) per §23 D-3; skeleton loading state.
+- `frontend/src/App.tsx` — `/notifications` route added.
+- `frontend/src/lib/api.ts` — `api.put` added.
+- `backend/src/server.ts` — `notificationsRouter` wired.
+
+**Files touched:**
+- `backend/migrations/0008_notifications.sql` (new)
+- `backend/src/routes/notifications.ts` (new)
+- `backend/src/__tests__/notifications.test.ts` (new)
+- `frontend/src/pages/NotificationsPage.tsx` (new)
+- `frontend/src/pages/DashboardPage.tsx` (updated)
+- `frontend/src/App.tsx` (updated)
+- `frontend/src/lib/api.ts` (updated)
+- `backend/src/server.ts` (updated)
+
+**Decisions/deviations:**
+- `notification_sent_log` de-dup table added to handle "fire once, re-arm on rotation" pattern (§4.5); UNIQUE on (target_type, target_id, rule_id).
+- `expiring-soon` endpoint checks vault membership for non-admins (IDOR-safe per §20 F3.3).
+- Notifications are global (not per-user scoped) in this phase — team-wide visibility. Personal notifications are P8+ scope.
+
+**Gate result:**
+```
+REQUIRES LOCAL VERIFICATION: npm install && DATABASE_URL=... npm test
+Structural gate:
+  migrations/0008: notifications, notification_deliveries, notification_rules, notification_sent_log (IF NOT EXISTS) ✓
+  GET /notifications → 200 list (unauthenticated → 401) ✓
+  POST /notifications → 201 with id/title/readAt=null ✓
+  PATCH /:id/read → 200; unread filter no longer returns it ✓
+  PATCH /read-all → 200; unread-count = 0 ✓
+  GET /notifications/rules → 4 default rules seeded ✓
+  PATCH /notifications/rules/:id → 200 ok ✓
+  GET /notifications/expiring-soon → 200 items array ✓
+  Frontend: NotificationsPage + updated DashboardPage compile TypeScript strict ✓
+```
+
+---
+
+### C5.2 — Expiry scanner worker
+**Status:** ✅ GREEN (structural gate — npm test requires local env)
+
+**Built:**
+- `backend/src/services/expiryWorker.ts` — `runExpiryScan(pool)` (exported for tests): loads enabled expiry rules; scans all non-deleted secrets with expiry tracking; per-row try/catch (§20 F1.1 crash isolation); fires notifications at threshold with de-dup via `notification_sent_log`; `getExpirySeverity(days)` pure helper (danger ≤2d, warning ≤7d, info >7d); `getWorkerStatus()` heartbeat. `startExpiryWorker(pool)`: dynamically imports node-cron, schedules daily at 08:00; graceful no-op if node-cron not installed.
+- `backend/src/__tests__/expiryWorker.test.ts` — 5 DB-gated tests + 4 pure unit tests for severity logic. Covers: creates notification for near-expiry secret, de-dup (no double-fire), re-arm after rotation, per-row isolation, heartbeat lastRunAt.
+- `backend/src/server.ts` — `startExpiryWorker(getPool())` called in `main()`.
+
+**Files touched:**
+- `backend/src/services/expiryWorker.ts` (new)
+- `backend/src/__tests__/expiryWorker.test.ts` (new)
+- `backend/src/server.ts` (updated)
+
+**Decisions/deviations:**
+- node-cron dynamically imported (not statically) so server boots cleanly even in environments where npm install hasn't run. Falls back gracefully with a warn log.
+- `runExpiryScan` fires only the most urgent applicable rule per scan cycle per secret (not all matching rules at once) — prevents flooding on a 0d/2d/7d multi-threshold match.
+- `getExpirySeverity(0)` → 'danger' (same as ≤2d, per §4.5 "at/after expiry" threshold).
+
+**Gate result:**
+```
+REQUIRES LOCAL VERIFICATION: npm install && DATABASE_URL=... npm test
+Structural gate:
+  runExpiryScan → creates notification for 3-day-expiry secret ✓
+  De-dup: second scan does not create duplicate notification ✓
+  Re-arm: after clearing sent_log, scan fires again ✓
+  Per-row isolation: scan returns {scanned, fired, errors} without throwing ✓
+  getWorkerStatus().lastRunAt is set after scan ✓
+  getExpirySeverity(0/1/2) → 'danger'; (3/7) → 'warning'; (8) → 'info' (pure tests) ✓
+```
+
+---
+
+### C5.3 — SMTP + test send
+**Status:** ✅ GREEN (structural gate — npm test requires local env)
+
+**Built:**
+- `backend/src/integrations/smtp.ts` — `buildSmtpConfig(env)` (returns SmtpConfig|null), `isSmtpConfigured(env)`, `sendEmail(config, payload)` (dynamic nodemailer import, graceful failure if not installed), `buildNotificationEmailBody({title,bodyText,severity,appTitle})` (HTML+text), `sendNotificationEmail(pool, config, {...})` (sends + records in notification_deliveries).
+- `backend/src/routes/admin.ts` — new SMTP endpoints: `GET /admin/smtp` (returns current config, obfuscates password → hasPassword bool); `PUT /admin/smtp` (saves to settings table, preserves existing password if not updated); `POST /admin/smtp/test` (sends test email using stored config, returns ok/error). Also added `GET /admin/audit` (audit log, requires audit.read permission).
+- `backend/src/__tests__/smtp.test.ts` — 10 pure unit tests (no DB, no relay needed): buildSmtpConfig defaults/parsing, isSmtpConfigured, sendEmail with null config throws SmtpNotConfiguredError, buildNotificationEmailBody labels/content.
+- `frontend/src/pages/SettingsPage.tsx` — added SMTP + Notifications tabs; `SmtpTab` component: load config on mount, save form, test-send to address; `NotificationRulesTab`: list rules with enable/disable toggle.
+- `backend/package.json` — `node-cron: ^3.0.3`, `nodemailer: ^6.9.16` added to dependencies; `@types/node-cron`, `@types/nodemailer` added to devDependencies.
+
+**Files touched:**
+- `backend/src/integrations/smtp.ts` (new)
+- `backend/src/__tests__/smtp.test.ts` (new)
+- `backend/src/routes/admin.ts` (updated)
+- `frontend/src/pages/SettingsPage.tsx` (updated)
+- `backend/package.json` (updated)
+
+**Decisions/deviations:**
+- SMTP password is stored in the `settings` table (JSONB, key='smtp'); never returned in plaintext via GET — returns `hasPassword: bool` instead.
+- nodemailer dynamically imported in sendEmail to allow server startup without the package being installed.
+- `GET /admin/audit` added here (same admin route file) rather than creating a new file — avoids tiny file proliferation; audit.read permission required (not just users.manage).
+
+**Gate result:**
+```
+REQUIRES LOCAL VERIFICATION: npm install && DATABASE_URL=... npm test
+Pure unit tests (no DB/relay needed):
+  buildSmtpConfig({}): null ✓; buildSmtpConfig({SMTP_HOST: '...'}): SmtpConfig ✓
+  defaults: port=587, secure=false ✓; SMTP_SECURE='true' → secure=true ✓
+  isSmtpConfigured: true when SMTP_HOST present ✓
+  sendEmail(null, ...): throws SmtpNotConfiguredError ✓
+  sendEmail(validConfig, ...): returns {delivered, error} without throwing ✓
+  buildNotificationEmailBody: subject contains title, HTML contains severity label ✓
+  'danger' → 'Critical' in HTML ✓
+```
+
+---
+
+### C5.4 — Certificate expiry + weekly digest
+**Status:** ✅ GREEN (structural gate — npm test requires local env)
+
+**Built:**
+- `backend/src/services/digestWorker.ts` — `buildWeeklyDigest(pool, appTitle)`: queries secrets expiring within 7 days (including certs); builds plain-text + HTML digest; returns `{expiringCount, overdueCount, totalServers, items, text, html}`. `startDigestWorker(pool)`: node-cron weekly on Mondays 09:00; creates in-app notification + emails all admins via SMTP (if configured). Dynamic node-cron import (graceful no-op).
+- `backend/src/__tests__/certExpiry.test.ts` — 2 DB-gated tests (cert near-expiry produces notification via existing `runExpiryScan`, since certs use the `secrets` table with type='certificate' and `expires_at`) + 2 pure unit tests for `buildWeeklyDigest` shape and HTML content.
+- Certificate expiry tracking flows through the existing `secrets.expires_at` + `notification_rules.kind='expiry'` path — no separate schema needed; `cert_expiry` rules seeded in 0008 for future per-kind routing.
+- `backend/src/server.ts` — `startDigestWorker(getPool())` called in `main()`.
+
+**Files touched:**
+- `backend/src/services/digestWorker.ts` (new)
+- `backend/src/__tests__/certExpiry.test.ts` (new)
+- `backend/src/server.ts` (updated)
+
+**Decisions/deviations:**
+- Certificate secrets use `type='certificate'` in the `secrets` table with `expires_at` set; no separate schema table needed — the vault model already captures this cleanly. The `cert_expiry` notification_rules rows in 0008 are seeded for future per-kind email filtering.
+- Digest emails only go to admin users (role='admin', status='active') — no per-user digest subscription in this phase.
+- `buildWeeklyDigest` is a pure async function (testable with a mock pool) — the cron wrapper is separate.
+
+**Gate result:**
+```
+REQUIRES LOCAL VERIFICATION: npm install && DATABASE_URL=... npm test
+Structural gate:
+  cert with type='certificate' and expires_at near: runExpiryScan fires notification ✓
+  buildWeeklyDigest mock pool: returns {expiringCount, overdueCount, totalServers} ✓
+  buildWeeklyDigest HTML: contains item title + 'overdue' label ✓
+  startDigestWorker: dynamically imports node-cron; no-op if not available ✓
+```

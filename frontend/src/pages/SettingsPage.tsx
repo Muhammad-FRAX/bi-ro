@@ -23,13 +23,218 @@ interface UserRow {
   roles: string[]
 }
 
-type TabId = 'users' | 'roles'
+type TabId = 'users' | 'roles' | 'smtp' | 'notifications'
 
 interface SettingsPageProps {
   user: { displayName: string; email: string; permissions: string[] }
   appTitle?: string
   onNavigate?: (path: string) => void
   onLogout?: () => void
+}
+
+// ── SMTP Settings Sub-component ─────────────────────────────────────────────
+function SmtpTab() {
+  const [host, setHost] = useState('')
+  const [port, setPort] = useState('587')
+  const [secure, setSecure] = useState(false)
+  const [user, setUser] = useState('')
+  const [password, setPassword] = useState('')
+  const [from, setFrom] = useState('')
+  const [testTo, setTestTo] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    api.get<{ smtp: { host: string | null; port: number; secure: boolean; user: string | null; from: string | null; hasPassword: boolean } }>('/admin/smtp')
+      .then((d) => {
+        setHost(d.smtp.host ?? '')
+        setPort(String(d.smtp.port))
+        setSecure(d.smtp.secure)
+        setUser(d.smtp.user ?? '')
+        setFrom(d.smtp.from ?? '')
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [])
+
+  async function handleSave(e: FormEvent) {
+    e.preventDefault()
+    setSaving(true)
+    setMsg(null)
+    try {
+      await api.put('/admin/smtp', {
+        host, port: parseInt(port, 10), secure, user: user || null,
+        password: password || undefined, from: from || null,
+      })
+      setMsg({ text: 'SMTP settings saved.', ok: true })
+      setPassword('')
+    } catch {
+      setMsg({ text: 'Failed to save SMTP settings.', ok: false })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleTest() {
+    if (!testTo.trim()) return
+    setTesting(true)
+    setMsg(null)
+    try {
+      await api.post('/admin/smtp/test', { to: testTo.trim() })
+      setMsg({ text: `Test email sent to ${testTo}.`, ok: true })
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Send failed'
+      setMsg({ text: `Test failed: ${message}`, ok: false })
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  if (loading) return <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading…</p>
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <h2 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: 'var(--text)' }}>SMTP Configuration</h2>
+
+      <form onSubmit={(e) => void handleSave(e)} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12 }}>
+          <Input id="smtp-host" label="Host" value={host} onChange={(e) => setHost(e.target.value)} placeholder="smtp.example.com" />
+          <Input id="smtp-port" label="Port" type="number" value={port} onChange={(e) => setPort(e.target.value)} placeholder="587" />
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <Input id="smtp-user" label="Username (optional)" value={user} onChange={(e) => setUser(e.target.value)} placeholder="user@example.com" />
+          <Input id="smtp-pass" label="Password (leave blank to keep existing)" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'end' }}>
+          <Input id="smtp-from" label="From address" value={from} onChange={(e) => setFrom(e.target.value)} placeholder="noreply@example.com" />
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--text-muted)', paddingBottom: 6, cursor: 'pointer' }}>
+            <input type="checkbox" checked={secure} onChange={(e) => setSecure(e.target.checked)} style={{ accentColor: 'var(--accent)' }} />
+            TLS (port 465)
+          </label>
+        </div>
+
+        {msg && (
+          <p style={{ margin: 0, fontSize: 13, color: msg.ok ? 'var(--success)' : 'var(--danger)' }}>{msg.text}</p>
+        )}
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save SMTP'}</Button>
+        </div>
+      </form>
+
+      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 20 }}>
+        <h3 style={{ margin: '0 0 12px', fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>Send test email</h3>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+          <Input id="smtp-test-to" label="Recipient" type="email" value={testTo} onChange={(e) => setTestTo(e.target.value)} placeholder="you@example.com" />
+          <Button type="button" onClick={() => void handleTest()} disabled={testing || !testTo.trim()}>
+            {testing ? 'Sending…' : 'Send test'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Notification Rules Sub-component ─────────────────────────────────────────
+interface NotifRule {
+  id: string
+  kind: string
+  thresholdDays: number | null
+  enabled: boolean
+}
+
+function NotificationRulesTab() {
+  const [rules, setRules] = useState<NotifRule[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState<string | null>(null)
+
+  async function loadRules() {
+    setLoading(true)
+    setError(null)
+    try {
+      const data = await api.get<{ rules: NotifRule[] }>('/notifications/rules')
+      setRules(data.rules)
+    } catch {
+      setError("Couldn't load notification rules")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void loadRules() }, [])
+
+  async function toggleRule(id: string, enabled: boolean) {
+    setSaving(id)
+    try {
+      await api.patch(`/notifications/rules/${id}`, { enabled })
+      setRules((prev) => prev.map((r) => (r.id === id ? { ...r, enabled } : r)))
+    } catch {
+      // best-effort
+    } finally {
+      setSaving(null)
+    }
+  }
+
+  const kindLabel: Record<string, string> = {
+    expiry: 'Credential expiry',
+    cert_expiry: 'Certificate expiry',
+    worker_stale: 'Scanner stale',
+    digest: 'Weekly digest',
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <h2 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: 'var(--text)' }}>Notification Rules</h2>
+      {loading ? (
+        <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading…</p>
+      ) : error ? (
+        <p style={{ color: 'var(--danger)', fontSize: 13 }}>{error}</p>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {rules.map((rule) => (
+            <div
+              key={rule.id}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '10px 14px',
+                background: 'var(--bg-elev)',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-sm)',
+              }}
+            >
+              <div>
+                <p style={{ margin: 0, fontSize: 13, fontWeight: 500, color: 'var(--text)' }}>
+                  {kindLabel[rule.kind] ?? rule.kind}
+                  {rule.thresholdDays !== null && (
+                    <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>
+                      {' '}— {rule.thresholdDays === 0 ? 'at expiry' : `${rule.thresholdDays}d before`}
+                    </span>
+                  )}
+                </p>
+              </div>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={rule.enabled}
+                  disabled={saving === rule.id}
+                  onChange={(e) => void toggleRule(rule.id, e.target.checked)}
+                  style={{ accentColor: 'var(--accent)', width: 14, height: 14 }}
+                />
+                <span style={{ fontSize: 12, color: rule.enabled ? 'var(--success)' : 'var(--text-muted)' }}>
+                  {rule.enabled ? 'Enabled' : 'Disabled'}
+                </span>
+              </label>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export function SettingsPage({ user, appTitle, onNavigate, onLogout }: SettingsPageProps) {
@@ -156,7 +361,7 @@ export function SettingsPage({ user, appTitle, onNavigate, onLogout }: SettingsP
           role="tablist"
           aria-label="Settings sections"
         >
-          {(['users', 'roles'] as TabId[]).map((t) => (
+          {(['users', 'roles', 'smtp', 'notifications'] as TabId[]).map((t) => (
             <button
               key={t}
               role="tab"
@@ -164,7 +369,7 @@ export function SettingsPage({ user, appTitle, onNavigate, onLogout }: SettingsP
               onClick={() => { setTab(t); setError(null) }}
               style={tabStyle(tab === t)}
             >
-              {t.charAt(0).toUpperCase() + t.slice(1)}
+              {t === 'smtp' ? 'SMTP' : t.charAt(0).toUpperCase() + t.slice(1)}
             </button>
           ))}
         </div>
@@ -375,6 +580,12 @@ export function SettingsPage({ user, appTitle, onNavigate, onLogout }: SettingsP
             />
           </div>
         )}
+
+        {/* SMTP tab */}
+        {tab === 'smtp' && <SmtpTab />}
+
+        {/* Notifications Rules tab */}
+        {tab === 'notifications' && <NotificationRulesTab />}
 
         {/* Roles tab */}
         {tab === 'roles' && (

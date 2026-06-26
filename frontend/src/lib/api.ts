@@ -49,6 +49,9 @@ export const api = {
   patch: <T>(path: string, body: unknown, init?: RequestInit) =>
     request<T>(path, { method: 'PATCH', body: JSON.stringify(body), ...init }),
 
+  put: <T>(path: string, body: unknown, init?: RequestInit) =>
+    request<T>(path, { method: 'PUT', body: JSON.stringify(body), ...init }),
+
   delete: <T>(path: string, init?: RequestInit) =>
     request<T>(path, { method: 'DELETE', ...init }),
 }

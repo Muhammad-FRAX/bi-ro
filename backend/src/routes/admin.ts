@@ -2,6 +2,7 @@ import { Router } from 'express'
 import type { Pool } from 'pg'
 import { requireAuth, requirePermission } from '../middleware/rbac.ts'
 import { hashPassword } from '../auth/self.ts'
+import { buildSmtpConfig, sendEmail, buildNotificationEmailBody } from '../integrations/smtp.ts'
 
 export function adminRouter(pool: Pool): Router {
   const router = Router()
@@ -213,6 +214,173 @@ export function adminRouter(pool: Pool): Router {
       }
 
       res.json({ ok: true })
+    } catch (err) {
+      next(err)
+    }
+  })
+
+  // ── GET /api/admin/smtp — get current SMTP settings (obfuscated) ─────────
+  router.get('/admin/smtp', async (_req, res, next) => {
+    try {
+      const { rows } = await pool.query<{ value: Record<string, unknown> }>(
+        `SELECT value FROM settings WHERE key = 'smtp'`,
+      )
+      const cfg = rows[0]?.value ?? {}
+      // Never return the password in plaintext
+      res.json({
+        smtp: {
+          host: cfg['host'] ?? null,
+          port: cfg['port'] ?? 587,
+          secure: cfg['secure'] ?? false,
+          user: cfg['user'] ?? null,
+          from: cfg['from'] ?? null,
+          hasPassword: Boolean(cfg['password']),
+        },
+      })
+    } catch (err) {
+      next(err)
+    }
+  })
+
+  // ── PUT /api/admin/smtp — save SMTP settings ──────────────────────────────
+  router.put('/admin/smtp', async (req, res, next) => {
+    try {
+      const { host, port, secure, user, password, from } = req.body as {
+        host?: unknown
+        port?: unknown
+        secure?: unknown
+        user?: unknown
+        password?: unknown
+        from?: unknown
+      }
+
+      if (typeof host !== 'string' || !host.trim()) {
+        res.status(400).json({ error: 'host is required' })
+        return
+      }
+
+      // Fetch existing to preserve password if not updating
+      const { rows: existingRows } = await pool.query<{ value: Record<string, unknown> }>(
+        `SELECT value FROM settings WHERE key = 'smtp'`,
+      )
+      const existing = existingRows[0]?.value ?? {}
+      const existingPassword = existing['password']
+
+      const newCfg = {
+        host: String(host).trim(),
+        port: typeof port === 'number' ? port : parseInt(String(port ?? '587'), 10),
+        secure: Boolean(secure),
+        user: user != null ? String(user) : null,
+        password: typeof password === 'string' && password ? password : existingPassword,
+        from: from != null ? String(from) : null,
+      }
+
+      await pool.query(
+        `INSERT INTO settings (key, value) VALUES ('smtp', $1)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        [JSON.stringify(newCfg)],
+      )
+
+      res.json({ ok: true })
+    } catch (err) {
+      next(err)
+    }
+  })
+
+  // ── POST /api/admin/smtp/test — send a test email ─────────────────────────
+  router.post('/admin/smtp/test', async (req, res, next) => {
+    try {
+      const { to } = req.body as { to?: unknown }
+      if (typeof to !== 'string' || !to.trim()) {
+        res.status(400).json({ error: 'to (email address) is required' })
+        return
+      }
+
+      // Load SMTP config from settings
+      const { rows } = await pool.query<{ value: Record<string, string | number | boolean> }>(
+        `SELECT value FROM settings WHERE key = 'smtp'`,
+      )
+      const cfg = rows[0]?.value
+      if (!cfg || !cfg['host']) {
+        res.status(422).json({ error: 'SMTP is not configured. Save SMTP settings first.' })
+        return
+      }
+
+      const smtpConfig = buildSmtpConfig({
+        SMTP_HOST: String(cfg['host'] ?? ''),
+        SMTP_PORT: String(cfg['port'] ?? '587'),
+        SMTP_SECURE: cfg['secure'] ? '1' : '0',
+        SMTP_USER: cfg['user'] != null ? String(cfg['user']) : undefined,
+        SMTP_PASS: cfg['password'] != null ? String(cfg['password']) : undefined,
+        SMTP_FROM: cfg['from'] != null ? String(cfg['from']) : undefined,
+      })
+
+      // Load appTitle from settings
+      const { rows: titleRows } = await pool.query<{ value: string }>(
+        `SELECT value FROM settings WHERE key = 'appTitle'`,
+      )
+      const appTitle = String(titleRows[0]?.value ?? '"BI Root"').replace(/^"|"$/g, '')
+
+      const emailBody = buildNotificationEmailBody({
+        title: 'Test email from BI Root',
+        bodyText: 'If you received this, SMTP is configured correctly.',
+        severity: 'info',
+        appTitle,
+      })
+
+      const result = await sendEmail(smtpConfig, {
+        to: to.trim(),
+        subject: emailBody.subject,
+        text: emailBody.text,
+        html: emailBody.html,
+      }).catch((err: Error) => ({ delivered: false, error: err.message }))
+
+      if (result.delivered) {
+        res.json({ ok: true, messageId: result.messageId })
+      } else {
+        res.status(422).json({ ok: false, error: result.error ?? 'Send failed' })
+      }
+    } catch (err) {
+      next(err)
+    }
+  })
+
+  // ── GET /api/admin/audit — audit log (admin only, read-only) ─────────────
+  router.get('/admin/audit', requirePermission('audit.read'), async (req, res, next) => {
+    try {
+      const limit = Math.min(parseInt(String(req.query['limit'] ?? '50'), 10), 200)
+      const offset = parseInt(String(req.query['offset'] ?? '0'), 10)
+      const action = req.query['action'] ? String(req.query['action']) : null
+      const actorId = req.query['actorId'] ? String(req.query['actorId']) : null
+
+      const conditions: string[] = []
+      const params: unknown[] = []
+      let idx = 1
+
+      if (action) {
+        conditions.push(`action = $${idx++}`)
+        params.push(action)
+      }
+      if (actorId) {
+        conditions.push(`actor_id = $${idx++}`)
+        params.push(actorId)
+      }
+
+      params.push(limit, offset)
+      const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+
+      const { rows } = await pool.query(
+        `SELECT al.id, al.actor_id, u.email AS actor_email, al.action, al.target_type, al.target_id,
+                al.ip, al.user_agent, al.result, al.ts, al.detail
+         FROM audit_log al
+         LEFT JOIN users u ON u.id = al.actor_id
+         ${where}
+         ORDER BY al.ts DESC
+         LIMIT $${idx} OFFSET $${idx + 1}`,
+        params,
+      )
+
+      res.json({ entries: rows })
     } catch (err) {
       next(err)
     }

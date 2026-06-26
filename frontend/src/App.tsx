@@ -11,6 +11,7 @@ import { TopologyPage } from './pages/TopologyPage.tsx'
 import { VaultListPage } from './pages/VaultListPage.tsx'
 import { VaultDetailPage } from './pages/VaultDetailPage.tsx'
 import { SecretDetailPage } from './pages/SecretDetailPage.tsx'
+import { NotificationsPage } from './pages/NotificationsPage.tsx'
 import { api } from './lib/api.ts'
 
 type AppState = 'loading' | 'setup' | 'login' | 'app'
@@ -220,6 +221,14 @@ export default function App() {
     return (
       <ThemeProvider>
         <SecretDetailPage secretId={secretDetailMatch[1]!} {...sharedProps} />
+      </ThemeProvider>
+    )
+  }
+
+  if (currentPath === '/notifications') {
+    return (
+      <ThemeProvider>
+        <NotificationsPage {...sharedProps} />
       </ThemeProvider>
     )
   }
