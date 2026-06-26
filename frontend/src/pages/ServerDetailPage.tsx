@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, Fragment, type CSSProperties, type FormEvent, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, useRef, Fragment, type CSSProperties, type FormEvent, type ReactNode } from 'react'
 import { AppShell } from '../components/AppShell.tsx'
 import { Button } from '../components/ui/Button.tsx'
 import { RevealDialog } from '../components/RevealDialog.tsx'
@@ -31,7 +31,7 @@ interface Server {
   createdAt: string; updatedAt: string; tags: Tag[]
 }
 
-type Tab = 'overview' | 'ports' | 'connections' | 'filesystem' | 'credentials'
+type Tab = 'overview' | 'ports' | 'connections' | 'filesystem' | 'credentials' | 'docs'
 
 interface ServerSecret {
   id: string; vault_id: string; type: string; title: string
@@ -231,6 +231,9 @@ export function ServerDetailPage({ serverId, user, appTitle, onNavigate, onLogou
               Credentials{credentials.length > 0 ? ` (${credentials.length})` : ''}
             </button>
           )}
+          <button style={TAB_STYLE(tab === 'docs')} onClick={() => setTab('docs')}>
+            Docs
+          </button>
         </div>
 
         {/* Overview tab */}
@@ -329,6 +332,11 @@ export function ServerDetailPage({ serverId, user, appTitle, onNavigate, onLogou
             onReveal={(id, title) => setRevealTarget({ id, title })}
             onNavigate={onNavigate}
           />
+        )}
+
+        {/* Docs tab */}
+        {tab === 'docs' && (
+          <DocsTab serverId={serverId} canWrite={canWrite} />
         )}
 
         {revealTarget && (
@@ -1063,6 +1071,153 @@ function CredentialsTab({ credentials, loading, canReveal, onReveal, onNavigate 
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+// ── Docs tab ──────────────────────────────────────────────────────────────────
+
+interface DocRecord {
+  id: string
+  filename: string
+  mime: string
+  size: number
+  uploaded_at: string
+}
+
+const ALLOWED_MIME_LABELS_SD: Record<string, string> = {
+  'text/plain': 'TXT', 'text/markdown': 'MD', 'text/x-markdown': 'MD',
+  'application/pdf': 'PDF', 'application/msword': 'DOC',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'DOCX',
+  'image/png': 'PNG', 'image/jpeg': 'JPG', 'image/gif': 'GIF',
+  'image/webp': 'WEBP', 'image/svg+xml': 'SVG',
+}
+
+function formatBytesSD(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function DocsTab({ serverId, canWrite }: { serverId: string; canWrite: boolean }) {
+  const [docs, setDocs] = useState<DocRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  async function load() {
+    setLoading(true); setError(null)
+    try {
+      const data = await api.get<DocRecord[]>(`/documents?linkedType=server&linkedId=${serverId}`)
+      setDocs(data)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to load documents')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void load() }, [serverId])
+
+  async function handleUpload(e: FormEvent) {
+    e.preventDefault()
+    const file = fileRef.current?.files?.[0]
+    if (!file) { setUploadError('Select a file first'); return }
+    setUploading(true); setUploadError(null)
+    try {
+      const form = new FormData()
+      form.append('file', file)
+      form.append('linkedType', 'server')
+      form.append('linkedId', serverId)
+      const res = await fetch('/api/documents', { method: 'POST', credentials: 'same-origin', body: form })
+      if (!res.ok) {
+        const body = await res.json() as { error?: string }
+        throw new Error(body.error ?? `HTTP ${res.status}`)
+      }
+      if (fileRef.current) fileRef.current.value = ''
+      await load()
+    } catch (err) {
+      setUploadError((err as Error).message)
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const TH: CSSProperties = { padding: '0 10px', fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600, textAlign: 'left' }
+  const TD: CSSProperties = { padding: '0 10px', fontSize: 13, color: 'var(--text)', height: 34 }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {canWrite && (
+        <form onSubmit={(e) => void handleUpload(e)}
+          style={{ background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 16, display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <input ref={fileRef} type="file"
+              accept=".txt,.md,.pdf,.doc,.docx,.png,.jpg,.jpeg,.gif,.webp,.svg"
+              style={{ color: 'var(--text)', fontSize: 13 }} />
+            <p style={{ margin: '4px 0 0', fontSize: 11, color: 'var(--text-subtle)' }}>
+              txt, md, pdf, doc, docx, png, jpg · Max 10 MB
+            </p>
+          </div>
+          <button type="submit" disabled={uploading}
+            style={{ height: 28, padding: '0 12px', background: 'var(--accent)', border: 'none', borderRadius: 'var(--radius-sm)', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', opacity: uploading ? 0.6 : 1 }}>
+            {uploading ? 'Uploading…' : 'Attach'}
+          </button>
+          {uploadError && <p style={{ width: '100%', margin: 0, fontSize: 12, color: 'var(--danger)' }}>{uploadError}</p>}
+        </form>
+      )}
+
+      {error && <p style={{ margin: 0, fontSize: 13, color: 'var(--danger)' }}>{error}</p>}
+      {loading && <p style={{ margin: 0, fontSize: 13, color: 'var(--text-muted)' }}>Loading…</p>}
+      {!loading && docs.length === 0 && (
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--text-muted)' }}>
+          No documents attached. {canWrite ? 'Upload one above.' : ''}
+        </p>
+      )}
+      {!loading && docs.length > 0 && (
+        <div style={{ background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                <th style={TH}>Filename</th>
+                <th style={TH}>Type</th>
+                <th style={TH}>Size</th>
+                <th style={TH}>Uploaded</th>
+                <th style={TH} />
+              </tr>
+            </thead>
+            <tbody>
+              {docs.map(doc => (
+                <tr key={doc.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                  <td style={TD}>
+                    <a href={`/api/documents/${doc.id}/view`} target="_blank" rel="noreferrer"
+                      style={{ color: 'var(--accent)', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                      {doc.filename}
+                    </a>
+                  </td>
+                  <td style={{ ...TD, fontSize: 12, color: 'var(--text-muted)' }}>
+                    {ALLOWED_MIME_LABELS_SD[doc.mime] ?? doc.mime.split('/')[1]?.toUpperCase()}
+                  </td>
+                  <td style={{ ...TD, fontSize: 12, color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums' }}>
+                    {formatBytesSD(doc.size)}
+                  </td>
+                  <td style={{ ...TD, fontSize: 12, color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums' }}>
+                    {new Date(doc.uploaded_at).toLocaleDateString()}
+                  </td>
+                  <td style={{ ...TD, textAlign: 'right' }}>
+                    <a href={`/api/documents/${doc.id}/download`} download={doc.filename}
+                      style={{ fontSize: 12, color: 'var(--accent)', textDecoration: 'none' }}>
+                      ↓
+                    </a>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }

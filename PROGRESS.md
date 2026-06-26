@@ -894,3 +894,88 @@ Structural gate:
   buildWeeklyDigest HTML: contains item title + 'overdue' label ✓
   startDigestWorker: dynamically imports node-cron; no-op if not available ✓
 ```
+
+---
+
+## Phase 6 — Documents
+
+### C6.1 — Document upload & storage
+**Status:** ✅ GREEN (structural gate — npm install + test requires local env)
+
+**Built:**
+- `backend/migrations/0009_documents.sql` — `documents` table: id, filename, mime, size, checksum (SHA-256), storage_path, linked_type (server|app|script|secret|vault), linked_id, uploaded_by FK, uploaded_at, deleted_at; indexes on (linked_type, linked_id) WHERE deleted_at IS NULL + uploaded_by.
+- `backend/src/routes/documents.ts` — `documentsRouter(pool, uploadsDir)`: multer disk storage (UUID filename in uploadsDir); MIME allowlist (txt/md/pdf/doc/docx/png/jpg/gif/webp/svg); 10MB size limit; POST /documents (requireAuth + docs.write — upload, compute SHA-256, store metadata); GET /documents (list, optional linkedType/linkedId filter, docs.read); GET /documents/:id (metadata, docs.read); GET /documents/:id/download (stream with attachment header, docs.read); GET /documents/:id/view (inline — docx→HTML via mammoth, PDF/text/image passthrough, docs.read); DELETE /documents/:id (soft-delete, docs.write).
+- `backend/src/__tests__/documents.test.ts` — 14-test DB-gated integration suite: 401 unauthenticated, 403 viewer upload, admin upload TXT/PDF, file stored on disk, MIME rejection 400, oversize 413, metadata GET, viewer read OK, entity-link upload, list/filter by entity, download content+headers, view inline, soft-delete 404-after, viewer delete 403.
+- `backend/src/config.ts` — `uploadsDir` field added (env `UPLOADS_DIR`, default `/uploads`).
+- `backend/src/server.ts` — `uploadsDir` in `AppOptions`; `documentsRouter` wired; `uploadsDir` passed from config in `main()`.
+- `backend/package.json` — `multer: ^1.4.5-lts.2`, `mammoth: ^1.9.0` added to dependencies; `@types/multer: ^1.4.12`, `@types/mammoth: ^1.9.0` added to devDependencies.
+- `.env.example` — `UPLOADS_DIR=/uploads` documented.
+- `docker-compose.yaml` — `UPLOADS_DIR: /app/uploads` env added to `bi-ro` service (volume already present from prior phases).
+
+**Files touched:**
+- `backend/migrations/0009_documents.sql` (new)
+- `backend/src/routes/documents.ts` (new)
+- `backend/src/__tests__/documents.test.ts` (new)
+- `backend/src/config.ts` (updated — uploadsDir field)
+- `backend/src/server.ts` (updated — documentsRouter + uploadsDir)
+- `backend/package.json` (updated — multer + mammoth)
+- `.env.example` (updated — UPLOADS_DIR)
+- `docker-compose.yaml` (updated — UPLOADS_DIR env)
+
+**Decisions/deviations:**
+- Files stored on the `bi-ro-uploads` Docker volume by relative `storage_path` (UUID-based filename); full path reconstructed at serve-time from `uploadsDir + storage_path`.
+- MIME check uses multer fileFilter (server-enforced, not Content-Type from client — Content-Type header from client is used but the allowlist is the gate).
+- Documents are soft-deleted (deleted_at) — physical file remains on disk; hard purge is a future ops tool.
+- mammoth is dynamically imported inside the view handler so server boots without it installed; docx falls back to download on import failure.
+- docs.read / docs.write permissions were already seeded in 0002_identity.sql (viewer and above get docs.read; editor and above get docs.write).
+
+**Gate result:**
+```
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && DATABASE_URL=... npm test
+Structural gate:
+  0009_documents.sql: documents table; linked_type CHECK; FK to users; soft-delete; indexes ✓
+  POST /documents: multer MIME filter → 400 on disallowed type; LIMIT_FILE_SIZE → 413 ✓
+  POST /documents: SHA-256 checksum computed from stored file; metadata returned without crypto fields ✓
+  GET /documents/:id: metadata only; unauthenticated → 401; viewer → 200 ✓
+  GET /documents?linkedType=server&linkedId=...: filters correctly ✓
+  GET /documents/:id/download: attachment Content-Disposition; streams file bytes ✓
+  GET /documents/:id/view: inline for text; mammoth HTML for docx; PDF passthrough ✓
+  DELETE /documents/:id: soft-delete; subsequent GET → 404; viewer → 403 ✓
+  RBAC: docs.write on POST/DELETE; docs.read on GET* ✓
+  Parameterized SQL throughout (no string interpolation) ✓
+```
+
+---
+
+### C6.2 — Viewers + download
+**Status:** ✅ GREEN (structural gate — npm build requires local env)
+
+**Built:**
+- `GET /api/documents/:id/view` (in documents.ts) — inline viewer endpoint: docx/doc → mammoth HTML (dynamic import, graceful fallback to download); PDF/images → passthrough with inline Content-Disposition; text/markdown → passthrough inline.
+- `frontend/src/pages/DocumentsPage.tsx` — global document library: DataTable with filename (click-to-open viewer), MimeBadge, size (formatted), linked entity, upload date; upload form (FormData, MIME accept, 10MB guidance); inline `DocumentViewer` overlay (focus-trapped modal, PDF iframe, image tag, text pre, docx innerHTML from mammoth HTML, download link); empty state per §23 D-1; viewer→download fallback.
+- `frontend/src/pages/ServerDetailPage.tsx` — added `DocsTab` component: load/upload documents for a server (linkedType=server, linkedId=serverId); filename opens /view in new tab; download link; MIME badge; empty state; upload form only shown to users with docs.write; "Docs" tab button added; Tab type extended to include 'docs'.
+- `frontend/src/App.tsx` — `/documents` route added → DocumentsPage.
+
+**Files touched:**
+- `backend/src/routes/documents.ts` (view endpoint — included in C6.1 commit for cohesion)
+- `frontend/src/pages/DocumentsPage.tsx` (new)
+- `frontend/src/pages/ServerDetailPage.tsx` (updated — DocsTab + tab button + useRef import)
+- `frontend/src/App.tsx` (updated — /documents route)
+
+**Decisions/deviations:**
+- DocumentViewer uses iframe for PDF (PDF.js is loaded automatically by the browser via the blob URL), no separate PDF.js bundle needed.
+- Server detail "Docs" tab makes an inline request to /api/documents?linkedType=server&linkedId=... filtered view; filenames open /view in a new tab (simpler than embedded viewer in the narrow tab context).
+- mammoth is dynamically imported server-side only; no client-side mammoth bundle needed (conversion happens at /api/documents/:id/view).
+- DocumentViewer is self-contained within DocumentsPage (not extracted to a separate component file) — used in exactly one place.
+
+**Gate result:**
+```
+REQUIRES LOCAL VERIFICATION: npm install --prefix frontend && npm run build (frontend)
+Structural gate (TypeScript reads):
+  DocumentsPage: upload form + DataTable + DocumentViewer + empty state ✓
+  DocumentViewer: PDF iframe; image tag; text pre; docx innerHTML; download link ✓
+  ServerDetailPage: DocsTab with upload + list + view/download links ✓
+  App.tsx: /documents route → DocumentsPage ✓
+  TypeScript strict: no any (explicit types throughout) ✓
+  AppShell: /documents nav link already present (from prior session) ✓
+```

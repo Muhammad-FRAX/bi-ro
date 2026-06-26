@@ -12,6 +12,7 @@ import { VaultListPage } from './pages/VaultListPage.tsx'
 import { VaultDetailPage } from './pages/VaultDetailPage.tsx'
 import { SecretDetailPage } from './pages/SecretDetailPage.tsx'
 import { NotificationsPage } from './pages/NotificationsPage.tsx'
+import { DocumentsPage } from './pages/DocumentsPage.tsx'
 import { api } from './lib/api.ts'
 
 type AppState = 'loading' | 'setup' | 'login' | 'app'
@@ -229,6 +230,14 @@ export default function App() {
     return (
       <ThemeProvider>
         <NotificationsPage {...sharedProps} />
+      </ThemeProvider>
+    )
+  }
+
+  if (currentPath === '/documents') {
+    return (
+      <ThemeProvider>
+        <DocumentsPage {...sharedProps} />
       </ThemeProvider>
     )
   }

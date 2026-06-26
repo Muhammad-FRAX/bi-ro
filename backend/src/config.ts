@@ -9,6 +9,7 @@ export interface Config {
   readonly appAccent: string
   readonly adminEmail: string | undefined
   readonly adminPassword: string | undefined
+  readonly uploadsDir: string
 }
 
 const VALID_AUTH_MODES = ['self', 'keycloak', 'ldap'] as const
@@ -57,6 +58,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   const appAccent = env['APP_ACCENT'] ?? '#a78bfa'
   const adminEmail = env['BIRO_ADMIN_EMAIL']
   const adminPassword = env['BIRO_ADMIN_PASSWORD']
+  const uploadsDir = env['UPLOADS_DIR'] ?? '/uploads'
 
   const cfg = {
     authMode: authMode as 'self' | 'keycloak' | 'ldap',
@@ -69,6 +71,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     appAccent,
     adminEmail,
     adminPassword,
+    uploadsDir,
     toJSON() {
       return {
         authMode: this.authMode,
@@ -81,6 +84,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
         kek: '[REDACTED]',
         sessionSecret: '[REDACTED]',
         adminPassword: this.adminPassword != null ? '[REDACTED]' : undefined,
+      uploadsDir: this.uploadsDir,
       }
     },
   }
