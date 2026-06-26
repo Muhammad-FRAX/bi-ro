@@ -1,4 +1,5 @@
 import { ThemeToggle } from './ThemeToggle.tsx'
+import { api } from '../lib/api.ts'
 
 const NAV_ITEMS = [
   { label: 'Dashboard', href: '/' },
@@ -17,11 +18,30 @@ const NAV_ITEMS = [
 interface AppShellProps {
   children: React.ReactNode
   title?: string
+  currentPath?: string
+  onNavigate?: (path: string) => void
+  user?: { displayName: string; email: string }
+  onLogout?: () => void
 }
 
-export function AppShell({ children, title = 'BI Root' }: AppShellProps) {
-  // TODO: replace with useLocation() when react-router is added (C1.3+)
-  const currentPath = window.location.pathname
+export function AppShell({
+  children,
+  title = 'BI Root',
+  currentPath,
+  onNavigate,
+  user,
+  onLogout,
+}: AppShellProps) {
+  // Fall back to window.location.pathname if no currentPath prop
+  const activePath = currentPath ?? window.location.pathname
+
+  function handleLogout() {
+    api.post('/auth/logout', {}).then(() => {
+      onLogout?.()
+    }).catch(() => {
+      onLogout?.()
+    })
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
@@ -50,7 +70,61 @@ export function AppShell({ children, title = 'BI Root' }: AppShellProps) {
           {title}
         </span>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {user && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {/* User chip */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '4px 8px',
+                  background: 'var(--bg-elev-2)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)',
+                  fontSize: 12,
+                  color: 'var(--text-muted)',
+                }}
+              >
+                <span
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: '50%',
+                    background: 'var(--accent-soft)',
+                    border: '1px solid var(--accent)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: 'var(--accent)',
+                    flexShrink: 0,
+                  }}
+                  aria-hidden
+                >
+                  {user.displayName.charAt(0).toUpperCase()}
+                </span>
+                <span style={{ color: 'var(--text)', fontWeight: 500 }}>{user.displayName}</span>
+              </div>
+              <button
+                onClick={handleLogout}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  color: 'var(--text-muted)',
+                  padding: '4px 8px',
+                  borderRadius: 'var(--radius-sm)',
+                  fontFamily: 'inherit',
+                }}
+              >
+                Sign out
+              </button>
+            </div>
+          )}
           <ThemeToggle />
         </div>
       </header>
@@ -69,11 +143,13 @@ export function AppShell({ children, title = 'BI Root' }: AppShellProps) {
           }}
         >
           {NAV_ITEMS.map((item) => {
-            const active = currentPath === item.href
+            const active = activePath === item.href
             return (
               <a
                 key={item.href}
                 href={item.href}
+                onClick={onNavigate ? (e) => { e.preventDefault(); onNavigate(item.href) } : undefined}
+                aria-current={active ? 'page' : undefined}
                 style={{
                   display: 'block',
                   padding: '6px 14px',
