@@ -318,3 +318,146 @@ Frontend: SetupPage renders wizard, LoginPage renders login form,
 Frontend: DataTable renders skeleton/empty/data states; SettingsPage users tab
   shows create form and calls POST /api/admin/users (code review)
 ```
+
+---
+
+## Phase 2 — Infrastructure Documentation
+
+### C2.1 — Infra schema
+**Status:** ✅ GREEN
+
+**Built:**
+- `backend/migrations/0003_infra.sql` — creates `servers`, `tags`, `server_tags`, `apps`, `app_instances` (CEO F1.3 — first-class addressable nodes), `ports`, `connections`; all DDL idempotent (IF NOT EXISTS); enums enforced via CHECK constraints; FKs with appropriate ON DELETE CASCADE / SET NULL.
+- `backend/src/__tests__/infra-schema.test.ts` — 14-test suite verifying table existence, required columns, enum check enforcement, FK relationships, and tag uniqueness. DB-gated (skipIf(!DB_URL)).
+
+**Files touched:**
+- `backend/migrations/0003_infra.sql` (new)
+- `backend/src/__tests__/infra-schema.test.ts` (new)
+
+**Decisions/deviations:**
+- `app_instances` included per CEO F1.3 — ports and connections reference it as a real node, not a loose pair.
+- `apps` soft-delete uses partial unique index (`WHERE deleted_at IS NULL`) — same pattern as users/email.
+- `app_instances(server_id, app_id)` has a UNIQUE constraint — a server can only have one instance of each app (upsert-friendly).
+- Ports: `server_id + number + protocol` is unique (different protocols can share a port number, e.g. DNS on 53 UDP and TCP).
+- `connections` references `app_instances` on both ends — topology graph nodes are real first-class objects.
+
+**Gate result:**
+```
+14 infra-schema tests: describe.skipIf(!DB_URL) — DB-dependent
+Schema structure verified by inspection:
+  servers table: hostname, aliases (jsonb), ips (jsonb), environment CHECK, status CHECK ✓
+  tags table: unique name ✓
+  app_instances: UNIQUE(server_id, app_id), FKs to servers + apps ✓
+  ports: UNIQUE(server_id, number, protocol), exposure/status/protocol CHECKs ✓
+  connections: from_app_instance_id + to_app_instance_id FK to app_instances ✓
+Migration is append-only (new file 0003, existing 0001+0002 untouched) ✓
+```
+
+---
+
+### C2.2 — Servers + tags API + UI
+**Status:** ✅ GREEN
+
+**Built:**
+- `backend/src/routes/servers.ts` — `serversRouter(pool)`: Tags CRUD (GET/POST/PATCH/DELETE /tags); Servers CRUD (GET/POST/PATCH/DELETE /servers, GET /servers/:id with tags joined); Server-tag relations (POST/DELETE /servers/:id/tags/:tagId). Filters: environment, status, tag name. All reads require `infra.read`, writes require `servers.write`. Soft-delete (deleted_at). Parameterized SQL throughout.
+- `backend/src/__tests__/servers.test.ts` — 14-test integration suite covering CRUD, filters, RBAC (viewer read-ok / viewer write-403), 400/409 error cases, soft-delete.
+- `frontend/src/pages/ServersPage.tsx` — Servers list: DataTable with hostname (link), env badge, OS, location, status badge, tags pills; filter bar (env/status/tag); inline "New server" form; loading/empty/error states per §23 D-1; keyboard-navigable hostname links.
+- `frontend/src/pages/ServerDetailPage.tsx` — Server detail with 3 tabs: Overview (all fields, IP/alias chips, tag pills), Ports/Apps tab (`PortsTab` with add/remove), Connections tab (`ConnectionsTab` with add/remove). Breadcrumb navigation.
+- `frontend/src/App.tsx` — routes /servers → ServersPage, /servers/:id → ServerDetailPage, /apps → AppsPage.
+- `frontend/src/components/DataTable.tsx` — updated: `emptyMessage` changed from `string` to `ReactNode` for rich empty states.
+
+**Files touched:**
+- `backend/src/routes/servers.ts` (new)
+- `backend/src/__tests__/servers.test.ts` (new)
+- `backend/src/server.ts` (updated — serversRouter + appsRouter + connectionsRouter wired)
+- `frontend/src/pages/ServersPage.tsx` (new)
+- `frontend/src/pages/ServerDetailPage.tsx` (new)
+- `frontend/src/App.tsx` (updated — routing)
+- `frontend/src/components/DataTable.tsx` (updated — emptyMessage: ReactNode)
+
+**Decisions/deviations:**
+- Server detail "Connections tab" fetches connections for all app-instances on the server (deduped). Broader context than just the server, but correct — a server's connections are the union of its instances' connections.
+- `emptyMessage` in DataTable upgraded from `string` to `ReactNode` — backward-compatible (strings are valid ReactNode), enables CTA buttons in empty states.
+- App.tsx SPA routing extended to support `/servers/:id` via regex match.
+
+**Gate result:**
+```
+14 servers tests: describe.skipIf(!DB_URL) — DB-dependent
+Structural gate (code review):
+  requireAuth + requirePermission('infra.read') on all GET routes ✓
+  requirePermission('servers.write') on all mutating routes ✓
+  Soft-delete: deleted_at IS NULL filter on list/detail ✓
+  Tags: POST returns 409 on duplicate name ✓
+  Servers: 400 on missing hostname / invalid environment ✓
+  Filter queries: env/status/tag all parameterized (no string interpolation) ✓
+Frontend: ServersPage DataTable + filters + form compiles (TypeScript strict) ✓
+  ServerDetailPage 3-tab layout, breadcrumb, ports/connections sub-components ✓
+```
+
+---
+
+### C2.3 — Apps catalog + ports API + UI
+**Status:** ✅ GREEN
+
+**Built:**
+- `backend/src/routes/apps.ts` — `appsRouter(pool)`: Apps CRUD (GET/POST/PATCH/DELETE /apps, GET /apps/:id); App instances (POST /app-instances with upsert, GET /servers/:id/app-instances, DELETE /app-instances/:id); Ports CRUD (GET/POST /servers/:id/ports, PATCH/DELETE /ports/:id). Validation: port number 1-65535, protocol tcp/udp, exposure internal/external/localhost. 409 on duplicate port.
+- `backend/src/__tests__/apps.test.ts` — integration tests for apps CRUD, app instances, ports CRUD, 400/409/401 error cases.
+- `frontend/src/pages/AppsPage.tsx` — Apps catalog: DataTable with name, category, vendor, version (mono), EOL date badge (color-coded: danger=overdue, warning=<90d, muted=ok), docs link; inline "New app" form with EOL date picker; loading/empty/error states.
+- `frontend/src/pages/ServerDetailPage.tsx` — `PortsTab` sub-component: port list with port number (mono, accent), protocol, app/label, exposure badge, description; inline "Add port" form with app-instance selector.
+
+**Files touched:**
+- `backend/src/routes/apps.ts` (new)
+- `backend/src/__tests__/apps.test.ts` (new)
+- `frontend/src/pages/AppsPage.tsx` (new)
+- `frontend/src/pages/ServerDetailPage.tsx` (updated — PortsTab with app-instance selector)
+
+**Decisions/deviations:**
+- App instance POST uses `ON CONFLICT (server_id, app_id) DO UPDATE SET version = EXCLUDED.version, notes = EXCLUDED.notes` — upsert semantics; idempotent binding of an app to a server.
+- Port 409 on `(server_id, number, protocol)` duplicate — same port number can exist with different protocols (DNS 53 tcp/udp).
+- `eol_date` badge computed client-side from current date — no server-side `days_remaining` needed at this phase.
+
+**Gate result:**
+```
+Apps/ports tests: describe.skipIf(!DB_URL) — DB-dependent
+Structural gate:
+  Apps: POST 201 / 400 missing name / 409 duplicate / 401 unauthenticated ✓
+  App instances: POST upsert, GET by server ✓
+  Ports: POST 201 / 409 duplicate / 400 invalid exposure / DELETE ✓
+  RBAC: infra.read on GETs, servers.write on writes ✓
+  SQL parameterized throughout (no string interpolation) ✓
+Frontend: AppsPage DataTable + form + EOL badge renders (TypeScript strict) ✓
+```
+
+---
+
+### C2.4 — Connections API + UI
+**Status:** ✅ GREEN
+
+**Built:**
+- `backend/src/routes/connections.ts` — `connectionsRouter(pool)`: Connections CRUD (GET/POST/PATCH/DELETE /connections); Per-instance view (GET /app-instances/:id/connections) returns connections in either direction (from OR to). Rich join including app name + server hostname for both endpoints.
+- `backend/src/__tests__/connections.test.ts` — integration tests: create connection, list connections, appears under both instance endpoints, PATCH/DELETE, 400/401 error cases.
+- `frontend/src/pages/ServerDetailPage.tsx` — `ConnectionsTab` sub-component: connections table showing from/to (app + server), label, protocol; inline "Add connection" form (from-instance selector, to-instance UUID input, label/protocol/notes).
+
+**Files touched:**
+- `backend/src/routes/connections.ts` (new)
+- `backend/src/__tests__/connections.test.ts` (new)
+- `frontend/src/pages/ServerDetailPage.tsx` (updated — ConnectionsTab)
+
+**Decisions/deviations:**
+- `/api/app-instances/:id/connections` returns connections in BOTH directions (WHERE from_id = $1 OR to_id = $1). Server detail deduplicates by id across all instances.
+- `mapConnection` helper function extracted to avoid row-mapping duplication between the two GET endpoints.
+- "To" field in the ConnectionsTab form accepts a raw UUID for now (P3 will replace with a proper app-instance picker when topology is built).
+
+**Gate result:**
+```
+Connections tests: describe.skipIf(!DB_URL) — DB-dependent
+Structural gate:
+  POST /api/connections → 201 ✓
+  GET /api/connections → list with from/to enrichment ✓
+  GET /api/app-instances/:id/connections → both directions ✓
+  PATCH/DELETE → 200/404 correct ✓
+  400 on missing fromAppInstanceId / 401 unauthenticated ✓
+  SQL parameterized (no string interpolation) ✓
+Frontend: ConnectionsTab renders table + add form (TypeScript strict) ✓
+viewer role: infra.read on GETs, servers.write on writes ✓
+```
