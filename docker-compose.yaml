@@ -41,6 +41,7 @@ services:
       SMTP_PASS: ${SMTP_PASS:-}
       SMTP_FROM: ${SMTP_FROM:-}
       EXPIRY_THRESHOLDS: ${EXPIRY_THRESHOLDS:-7,2,0}
+      UPLOADS_DIR: /app/uploads
       PORT: 5000
     volumes:
       - bi-ro-uploads:/app/uploads

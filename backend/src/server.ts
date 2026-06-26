@@ -22,6 +22,7 @@ import { fsRouter } from './routes/fs.ts'
 import { vaultRouter } from './routes/vault.ts'
 import { revealRouter } from './middleware/stepUp.ts'
 import { notificationsRouter } from './routes/notifications.ts'
+import { documentsRouter } from './routes/documents.ts'
 import { startExpiryWorker } from './services/expiryWorker.ts'
 import { startDigestWorker } from './services/digestWorker.ts'
 import { initConfig, getConfig } from './config.ts'
@@ -38,6 +39,7 @@ interface AppOptions {
   adminEmail?: string
   adminPassword?: string
   authMode?: 'self' | 'keycloak' | 'ldap'
+  uploadsDir?: string
 }
 
 // createApp: accepts optional opts. When omitted (unit tests), auth middleware is skipped.
@@ -69,6 +71,7 @@ export function createApp(opts?: AppOptions): express.Express {
     app.use('/api', vaultRouter(opts.pool))
     app.use('/api', revealRouter(opts.pool))
     app.use('/api', notificationsRouter(opts.pool))
+    app.use('/api', documentsRouter(opts.pool, opts.uploadsDir ?? '/uploads'))
   }
 
   app.use('/api', healthRouter)
@@ -108,6 +111,7 @@ async function main(): Promise<void> {
     adminEmail: cfg.adminEmail,
     adminPassword: cfg.adminPassword,
     authMode: cfg.authMode,
+    uploadsDir: cfg.uploadsDir,
   })
 
   app.listen(cfg.port, () => {
