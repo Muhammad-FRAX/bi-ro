@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, Fragment, type CSSProperties, type FormEvent, type ReactNode } from 'react'
 import { AppShell } from '../components/AppShell.tsx'
+import { Button } from '../components/ui/Button.tsx'
+import { RevealDialog } from '../components/RevealDialog.tsx'
 import { api, ApiError } from '../lib/api.ts'
 import { FolderTree } from '../components/FolderTree.tsx'
 import type { FsTreeNode } from '../components/FolderTree.tsx'
@@ -29,7 +31,13 @@ interface Server {
   createdAt: string; updatedAt: string; tags: Tag[]
 }
 
-type Tab = 'overview' | 'ports' | 'connections' | 'filesystem'
+type Tab = 'overview' | 'ports' | 'connections' | 'filesystem' | 'credentials'
+
+interface ServerSecret {
+  id: string; vault_id: string; type: string; title: string
+  username: string | null; host_url: string | null; days_remaining: number | null
+  last_changed_at: string
+}
 
 interface Props {
   serverId: string
@@ -92,8 +100,13 @@ export function ServerDetailPage({ serverId, user, appTitle, onNavigate, onLogou
   const [tab, setTab] = useState<Tab>('overview')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [credentials, setCredentials] = useState<ServerSecret[]>([])
+  const [credsLoading, setCredsLoading] = useState(false)
+  const [revealTarget, setRevealTarget] = useState<{ id: string; title: string } | null>(null)
 
   const canWrite = user.permissions.includes('servers.write')
+  const canReveal = user.permissions.includes('secrets.reveal')
+  const canViewSecrets = user.permissions.includes('secrets.view')
 
   const fetchAll = useCallback(async () => {
     setLoading(true)
@@ -132,6 +145,20 @@ export function ServerDetailPage({ serverId, user, appTitle, onNavigate, onLogou
   }, [serverId])
 
   useEffect(() => { void fetchAll() }, [fetchAll])
+
+  async function loadCredentials() {
+    if (!serverId) return
+    setCredsLoading(true)
+    try {
+      // Fetch secrets linked to this server
+      const data = await api.get<ServerSecret[]>(`/servers/${serverId}/secrets`)
+      setCredentials(data)
+    } catch {
+      // Viewer without secrets.view will get 403 — silently ignore
+    } finally {
+      setCredsLoading(false)
+    }
+  }
 
   const TAB_STYLE = (active: boolean): CSSProperties => ({
     height: 34, padding: '0 14px', background: 'none',
@@ -196,6 +223,14 @@ export function ServerDetailPage({ serverId, user, appTitle, onNavigate, onLogou
           <button style={TAB_STYLE(tab === 'filesystem')} onClick={() => setTab('filesystem')}>
             Filesystem
           </button>
+          {canViewSecrets && (
+            <button style={TAB_STYLE(tab === 'credentials')} onClick={() => {
+              setTab('credentials')
+              void loadCredentials()
+            }}>
+              Credentials{credentials.length > 0 ? ` (${credentials.length})` : ''}
+            </button>
+          )}
         </div>
 
         {/* Overview tab */}
@@ -283,6 +318,25 @@ export function ServerDetailPage({ serverId, user, appTitle, onNavigate, onLogou
         {/* Filesystem tab */}
         {tab === 'filesystem' && (
           <FilesystemTab serverId={serverId} canWrite={canWrite} />
+        )}
+
+        {/* Credentials tab — §4.4 server detail "credentials" tab */}
+        {tab === 'credentials' && canViewSecrets && (
+          <CredentialsTab
+            credentials={credentials}
+            loading={credsLoading}
+            canReveal={canReveal}
+            onReveal={(id, title) => setRevealTarget({ id, title })}
+            onNavigate={onNavigate}
+          />
+        )}
+
+        {revealTarget && (
+          <RevealDialog
+            secretId={revealTarget.id}
+            secretTitle={revealTarget.title}
+            onClose={() => setRevealTarget(null)}
+          />
         )}
       </div>
     </AppShell>
@@ -922,6 +976,93 @@ function ConnectionsTab({ connections, instances, canWrite, onRefresh, onNavigat
           </table>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Credentials tab ───────────────────────────────────────────────────────────
+
+interface CredentialsTabProps {
+  credentials: ServerSecret[]
+  loading: boolean
+  canReveal: boolean
+  onReveal: (id: string, title: string) => void
+  onNavigate?: (path: string) => void
+}
+
+const BADGE_CREDS: CSSProperties = {
+  display: 'inline-block', padding: '2px 7px', borderRadius: 99,
+  fontSize: 11, fontWeight: 600, letterSpacing: '0.02em',
+}
+
+function DaysRemainingBadgeCreds({ days }: { days: number | null }) {
+  if (days === null) return <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>—</span>
+  const c = days < 0 ? 'var(--danger)' : days <= 7 ? 'var(--warning)' : 'var(--success)'
+  return (
+    <span style={{ ...BADGE_CREDS, color: c, background: `color-mix(in srgb, ${c} 10%, transparent)`, border: `1px solid color-mix(in srgb, ${c} 25%, transparent)`, fontVariantNumeric: 'tabular-nums' }}>
+      {days < 0 ? `${Math.abs(Math.round(days))}d overdue` : `${Math.round(days)}d`}
+    </span>
+  )
+}
+
+function CredentialsTab({ credentials, loading, canReveal, onReveal, onNavigate }: CredentialsTabProps) {
+  const TR: CSSProperties = { height: 34, borderBottom: '1px solid var(--border)' }
+  const TD: CSSProperties = { padding: '0 10px', fontSize: 13, color: 'var(--text)' }
+  const TH: CSSProperties = { ...TD, fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600 }
+
+  if (loading) {
+    return <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '16px 0' }}>Loading credentials…</div>
+  }
+
+  if (credentials.length === 0) {
+    return (
+      <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '24px 0' }}>
+        No credentials linked to this server. Add a secret in a vault and link it to this server.
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <thead>
+          <tr style={{ borderBottom: '1px solid var(--border)' }}>
+            <th style={TH}>Title</th>
+            <th style={TH}>Type</th>
+            <th style={TH}>Username</th>
+            <th style={TH}>Last changed</th>
+            <th style={TH}>Expires in</th>
+            <th style={TH} />
+          </tr>
+        </thead>
+        <tbody>
+          {credentials.map((s) => (
+            <tr key={s.id} style={TR}>
+              <td style={TD}>
+                <button
+                  onClick={() => onNavigate?.(`/secrets/${s.id}`)}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent)', fontSize: 13, fontFamily: 'inherit', padding: 0 }}
+                >
+                  {s.title}
+                </button>
+              </td>
+              <td style={{ ...TD, fontSize: 12, color: 'var(--text-muted)' }}>{s.type.replace('_', ' ')}</td>
+              <td style={{ ...TD, fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.username ?? '—'}</td>
+              <td style={{ ...TD, fontSize: 12, color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums' }}>
+                {new Date(s.last_changed_at).toLocaleDateString()}
+              </td>
+              <td style={TD}><DaysRemainingBadgeCreds days={s.days_remaining} /></td>
+              <td style={{ ...TD, textAlign: 'right' }}>
+                {canReveal && (
+                  <Button size="sm" intent="secondary" onClick={() => onReveal(s.id, s.title)}>
+                    Reveal
+                  </Button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
