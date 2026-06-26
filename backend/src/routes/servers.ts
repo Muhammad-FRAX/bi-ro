@@ -322,5 +322,34 @@ export function serversRouter(pool: Pool): Router {
     } catch (err) { next(err) }
   })
 
+  // GET /servers/:id/secrets — credentials tab (C4.4): secrets linked to a server
+  router.get(
+    '/servers/:id/secrets',
+    requireAuth,
+    requirePermission('secrets.view'),
+    async (req, res, next) => {
+      try {
+        const { rows } = await pool.query(
+          `SELECT s.id, s.vault_id, s.type, s.title, s.username, s.host_url,
+                  s.rotation_period_days, s.expires_at, s.last_changed_at,
+                  CASE
+                    WHEN s.expires_at IS NOT NULL THEN
+                      EXTRACT(EPOCH FROM (s.expires_at - now())) / 86400.0
+                    WHEN s.rotation_period_days IS NOT NULL THEN
+                      s.rotation_period_days - EXTRACT(EPOCH FROM (now() - s.last_changed_at)) / 86400.0
+                    ELSE NULL
+                  END AS days_remaining
+           FROM secrets s
+           JOIN vaults v ON v.id = s.vault_id
+           JOIN vault_members vm ON vm.vault_id = v.id AND vm.user_id = $2
+           WHERE s.server_id = $1 AND s.deleted_at IS NULL
+           ORDER BY s.title`,
+          [req.params['id'], req.session.userId],
+        )
+        res.json(rows)
+      } catch (err) { next(err) }
+    },
+  )
+
   return router
 }
