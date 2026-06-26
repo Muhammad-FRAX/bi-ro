@@ -8,6 +8,9 @@ import { ServersPage } from './pages/ServersPage.tsx'
 import { ServerDetailPage } from './pages/ServerDetailPage.tsx'
 import { AppsPage } from './pages/AppsPage.tsx'
 import { TopologyPage } from './pages/TopologyPage.tsx'
+import { VaultListPage } from './pages/VaultListPage.tsx'
+import { VaultDetailPage } from './pages/VaultDetailPage.tsx'
+import { SecretDetailPage } from './pages/SecretDetailPage.tsx'
 import { api } from './lib/api.ts'
 
 type AppState = 'loading' | 'setup' | 'login' | 'app'
@@ -189,6 +192,34 @@ export default function App() {
     return (
       <ThemeProvider>
         <TopologyPage {...sharedProps} />
+      </ThemeProvider>
+    )
+  }
+
+  if (currentPath === '/vault') {
+    return (
+      <ThemeProvider>
+        <VaultListPage {...sharedProps} />
+      </ThemeProvider>
+    )
+  }
+
+  // /vault/:id
+  const vaultDetailMatch = currentPath.match(/^\/vault\/([^/]+)$/)
+  if (vaultDetailMatch) {
+    return (
+      <ThemeProvider>
+        <VaultDetailPage vaultId={vaultDetailMatch[1]!} {...sharedProps} />
+      </ThemeProvider>
+    )
+  }
+
+  // /secrets/:id
+  const secretDetailMatch = currentPath.match(/^\/secrets\/([^/]+)$/)
+  if (secretDetailMatch) {
+    return (
+      <ThemeProvider>
+        <SecretDetailPage secretId={secretDetailMatch[1]!} {...sharedProps} />
       </ThemeProvider>
     )
   }
