@@ -17,6 +17,8 @@ import { adminRouter } from './routes/admin.ts'
 import { serversRouter } from './routes/servers.ts'
 import { appsRouter } from './routes/apps.ts'
 import { connectionsRouter } from './routes/connections.ts'
+import { topologyRouter } from './routes/topology.ts'
+import { fsRouter } from './routes/fs.ts'
 import { initConfig, getConfig } from './config.ts'
 import { runMigrations } from './db/migrate.ts'
 import { initPool, getPool } from './db/pool.ts'
@@ -57,6 +59,8 @@ export function createApp(opts?: AppOptions): express.Express {
     app.use('/api', serversRouter(opts.pool))
     app.use('/api', appsRouter(opts.pool))
     app.use('/api', connectionsRouter(opts.pool))
+    app.use('/api', topologyRouter(opts.pool))
+    app.use('/api', fsRouter(opts.pool))
   }
 
   app.use('/api', healthRouter)
