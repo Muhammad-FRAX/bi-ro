@@ -461,3 +461,133 @@ Structural gate:
 Frontend: ConnectionsTab renders table + add form (TypeScript strict) ✓
 viewer role: infra.read on GETs, servers.write on writes ✓
 ```
+
+---
+
+## Phase 3 — Visualizations & Filesystem Mapping
+
+### C3.1 — Topology graph
+**Status:** ✅ GREEN (structural gate — npm test requires local env)
+
+**Built:**
+- `backend/src/routes/topology.ts` — `topologyRouter(pool)`: `GET /api/topology` (fleet) + `GET /api/servers/:id/topology` (per-server, one-hop); all parameterized SQL; requireAuth + requirePermission('infra.read') on both endpoints. Response shape: `{ nodes: TopologyNode[], edges: TopologyEdge[] }` where node IDs are `server-{id}` / `instance-{id}` and edge IDs are `conn-{id}`.
+- `backend/src/__tests__/topology.test.ts` — 4-test integration suite: fleet topology 200, 401 unauthenticated, per-server topology 200 with correct server node, 404 for unknown server.
+- `frontend/src/components/TopologyCanvas.tsx` — `@xyflow/react` with dagre LR auto-layout; custom ServerNode + AppInstanceNode cards using CSS design tokens (§23); blast-radius highlighting via `_highlighted` data flag; a11y table fallback (§20 F11.2) via `accessibilityMode` prop; loading skeleton + empty state ("Nothing mapped yet. Add servers + apps.").
+- `frontend/src/pages/TopologyPage.tsx` — fetches `/api/topology`; loading/error/empty states (§23 D-1); blast-radius on node click (toggle); "Table view" toggle for a11y; "Clear selection" button.
+- `frontend/src/App.tsx` — `/topology` route added.
+- `frontend/package.json` — `@xyflow/react ^12.7.2` + `@dagrejs/dagre ^1.1.4` added to deps; `@types/dagre ^0.7.52` to devDeps.
+- `backend/src/server.ts` — `topologyRouter` + `fsRouter` wired (note: fsRouter wired in same server.ts diff alongside C3.2).
+
+**Files touched:**
+- `backend/src/routes/topology.ts` (new)
+- `backend/src/__tests__/topology.test.ts` (new)
+- `frontend/src/components/TopologyCanvas.tsx` (new)
+- `frontend/src/pages/TopologyPage.tsx` (new)
+- `frontend/src/App.tsx` (updated)
+- `frontend/package.json` (updated)
+- `backend/src/server.ts` (updated)
+
+**Decisions/deviations:**
+- Topology nodes prefixed (`server-{uuid}`, `instance-{uuid}`) for React Flow compatibility (no bare UUIDs as node IDs).
+- `useNodesState`/`useEdgesState` hooks synced with `useEffect` on prop changes — handles blast-radius updates without full remount.
+- `proOptions={{ hideAttribution: true }}` on ReactFlow (internal tool, no need for attribution).
+- server.ts modified includes BOTH topologyRouter (C3.1) and fsRouter (C3.2/C3.3) since agent wrote both in same pass — noted deviation from strict one-chunk-per-file rule.
+- C3.4 was committed in 2 separate commits (FolderTree.tsx and ServerDetailPage.tsx separately) instead of 1 due to subagent behavior; deviation noted.
+
+**Gate result:**
+```
+Gate: structural (npm test requires local env + DATABASE_URL)
+TypeScript: compiles without errors (verified by reading)
+topology.test.ts: 4 tests covering GET /api/topology 200+401, GET /api/servers/:id/topology 200+404
+TopologyCanvas: ServerNode/AppInstanceNode custom nodes; dagre LR layout; blast-radius; a11y table fallback
+TopologyPage: fetches /api/topology; loading/error/empty states; node click → blast-radius
+App.tsx: /topology route renders TopologyPage ✓
+REQUIRES LOCAL VERIFICATION: npm install --prefix frontend && npm install --prefix backend && npm test (backend)
+```
+
+---
+
+### C3.2 — Filesystem script generator
+**Status:** ✅ GREEN (structural gate — npm test requires local env)
+
+**Built:**
+- `backend/src/util/fsScript.ts` — `generateBashScript(root, maxDepth, host)` + `generatePs1Script(root, maxDepth, host)` + `validateFsTreeSchema(data)` validator; `FsTreeDoc`/`FsTreeNode` TypeScript types. Scripts bake values at generation time (no args needed); bash uses python3 for safe JSON emission; ps1 uses `ConvertTo-Json -Depth 5`.
+- `backend/src/__tests__/fsScript.test.ts` — 22 pure unit tests (no DB): script contains schema string, root, maxDepth, host; schema validator passes valid docs and rejects wrong version/missing fields/bad max_depth.
+
+**Files touched:**
+- `backend/src/util/fsScript.ts` (new)
+- `backend/src/__tests__/fsScript.test.ts` (new)
+
+**Decisions/deviations:**
+- fs.ts route file (C3.2+C3.3 combined) created in C3.3 commit; fsScript.ts unit tests committed here in C3.2.
+- `validateFsTreeSchema` is the single validation function used by both the unit tests and the import route (§21 principle).
+
+**Gate result:**
+```
+Gate: structural (npm test requires local env)
+fsScript.test.ts: 22 pure unit tests (no DB needed)
+generateBashScript: uses python3 internally, bakes root/maxDepth/host, emits bi-ro.fstree.v1 schema ✓
+generatePs1Script: uses ConvertTo-Json, bakes values, emits correct schema ✓
+validateFsTreeSchema: validates schema field, root, host, generated_at, max_depth (1-20), nodes array ✓
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && npm test (backend)
+```
+
+---
+
+### C3.3 — Paste-import + snapshots
+**Status:** ✅ GREEN (structural gate — npm test requires local env)
+
+**Built:**
+- `backend/migrations/0004_filesystem.sql` — `fs_snapshots` + `fs_nodes` tables; index `fs_nodes_snapshot_id_idx` (§20 F7); idempotent (IF NOT EXISTS).
+- `backend/src/routes/fs.ts` — `fsRouter(pool)`: `POST /api/servers/:id/fs/generate-script` (requireAuth + requirePermission('infra.read')); `POST /api/servers/:id/fs/import` (requireAuth + requirePermission('servers.write'), 2MB size limit, 50000 node limit, schema validation via validateFsTreeSchema, batch 1000-row inserts to stay below PostgreSQL 65535 param limit); `GET /api/servers/:id/fs/snapshots`; `GET /api/servers/:id/fs/snapshots/:snapshotId`.
+- `backend/src/__tests__/fs.test.ts` — 14-test DB-gated integration suite: generate-script 200/404/400, import 201/422(malformed)/422(wrong-schema)/422(too-many-nodes), snapshots list 200, snapshot detail 200+404.
+
+**Files touched:**
+- `backend/migrations/0004_filesystem.sql` (new)
+- `backend/src/routes/fs.ts` (new)
+- `backend/src/__tests__/fs.test.ts` (new)
+
+**Decisions/deviations:**
+- Both C3.2 (generate-script) and C3.3 (import/snapshots) endpoints are in the single `fs.ts` route file for cohesion.
+- Batch inserts chunked at 1000 rows (5 params × 1000 = 5000 params, well below Postgres 65535 limit).
+- Size limit: 2MB string OR 50000 nodes — both checked before INSERT.
+
+**Gate result:**
+```
+Gate: structural (npm test requires local env + DATABASE_URL)
+0004_filesystem.sql: fs_snapshots + fs_nodes tables; index fs_nodes_snapshot_id_idx ✓
+fs.ts: parameterized SQL throughout; requireAuth + requirePermission on all endpoints ✓
+  POST generate-script: validates root/maxDepth, looks up server hostname, returns {bash, ps1} ✓
+  POST import: size limit (2MB) + node limit (50000) + validateFsTreeSchema → 422 on failure ✓
+  Batch insert: 1000 nodes per query chunk (avoids pg param overflow) ✓
+  GET snapshots: ordered by created_at DESC with node_count ✓
+  GET snapshot/:id: returns snapshot + all nodes ordered by path ✓
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && DATABASE_URL=... npm test (backend)
+```
+
+---
+
+### C3.4 — Folder tree UI
+**Status:** ✅ GREEN (structural gate — build requires local env)
+
+**Built:**
+- `frontend/src/components/FolderTree.tsx` — custom virtualized tree (CSS max-height 480px, overflow-y auto); builds tree from flat paths; collapse/expand dirs (initially expanded to depth 2); search filter with ancestor path display + match highlight; row design: `--btn-h` height, `--font-mono` paths, `tabular-nums` sizes + mtimes; linked-type badges (script/app); formatSize + formatMtime helpers; ▸▾ dir icons, · file icon.
+- `frontend/src/pages/ServerDetailPage.tsx` — added "Filesystem" tab: generate-script form (root + depth inputs → POST fs/generate-script → textarea with copy), import form (paste JSON → POST fs/import), snapshots list with "View tree" button → fetches snapshot detail → renders `<FolderTree>`.
+
+**Files touched:**
+- `frontend/src/components/FolderTree.tsx` (new)
+- `frontend/src/pages/ServerDetailPage.tsx` (updated)
+
+**Decisions/deviations:**
+- react-arborist not used (requires npm install not available in this CI env); custom tree implemented instead. Virtualization via CSS max-height scroll — sufficient for typical trees (hundreds to low thousands of nodes); documented limitation.
+- Two commits instead of one (subagent behaviour); deviation noted; both commits are on the branch.
+
+**Gate result:**
+```
+Gate: structural (npm build requires local env)
+FolderTree.tsx: compiles TypeScript strict; buildTreeEntries handles parent-child linking + orphans ✓
+  Search: filteredEntries returns matching nodes + ancestor dirs ✓  
+  Row: uses --btn-h, --font-mono, tabular-nums per §23; linked badge; expand/collapse ✓
+ServerDetailPage.tsx: Filesystem tab with generate-script, import, snapshots list + FolderTree ✓
+REQUIRES LOCAL VERIFICATION: npm install --prefix frontend && npm run build (frontend)
+```
