@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback, type CSSProperties, type FormEvent, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, Fragment, type CSSProperties, type FormEvent, type ReactNode } from 'react'
 import { AppShell } from '../components/AppShell.tsx'
 import { api, ApiError } from '../lib/api.ts'
+import { FolderTree } from '../components/FolderTree.tsx'
+import type { FsTreeNode } from '../components/FolderTree.tsx'
 
 interface Tag { id: string; name: string; color: string }
 interface AppInstance {
@@ -27,7 +29,7 @@ interface Server {
   createdAt: string; updatedAt: string; tags: Tag[]
 }
 
-type Tab = 'overview' | 'ports' | 'connections'
+type Tab = 'overview' | 'ports' | 'connections' | 'filesystem'
 
 interface Props {
   serverId: string
@@ -191,6 +193,9 @@ export function ServerDetailPage({ serverId, user, appTitle, onNavigate, onLogou
           <button style={TAB_STYLE(tab === 'connections')} onClick={() => setTab('connections')}>
             Connections{connections.length > 0 ? ` (${connections.length})` : ''}
           </button>
+          <button style={TAB_STYLE(tab === 'filesystem')} onClick={() => setTab('filesystem')}>
+            Filesystem
+          </button>
         </div>
 
         {/* Overview tab */}
@@ -274,8 +279,319 @@ export function ServerDetailPage({ serverId, user, appTitle, onNavigate, onLogou
             onNavigate={onNavigate}
           />
         )}
+
+        {/* Filesystem tab */}
+        {tab === 'filesystem' && (
+          <FilesystemTab serverId={serverId} canWrite={canWrite} />
+        )}
       </div>
     </AppShell>
+  )
+}
+
+// ── Filesystem tab ────────────────────────────────────────────────────────────
+
+interface FsSnapshot {
+  id: string
+  serverId: string
+  rootPath: string
+  maxDepth: number
+  host: string
+  generatedAt: string
+  createdAt: string
+  nodeCount: number
+}
+
+interface FsNode {
+  id: string
+  path: string
+  type: 'dir' | 'file'
+  size: number | null
+  mtime: string | null
+  linkedType: string | null
+  linkedId: string | null
+}
+
+interface FilesystemTabProps {
+  serverId: string
+  canWrite: boolean
+}
+
+function FilesystemTab({ serverId, canWrite }: FilesystemTabProps) {
+  // Generate script state
+  const [genRoot, setGenRoot] = useState('/')
+  const [genDepth, setGenDepth] = useState('3')
+  const [genLoading, setGenLoading] = useState(false)
+  const [genError, setGenError] = useState<string | null>(null)
+  const [bash, setBash] = useState<string | null>(null)
+  const [ps1, setPs1] = useState<string | null>(null)
+
+  // Import state
+  const [importJson, setImportJson] = useState('')
+  const [importLoading, setImportLoading] = useState(false)
+  const [importError, setImportError] = useState<string | null>(null)
+  const [importResult, setImportResult] = useState<FsSnapshot | null>(null)
+
+  // Snapshots list state
+  const [snapshots, setSnapshots] = useState<FsSnapshot[] | null>(null)
+  const [snapshotsLoading, setSnapshotsLoading] = useState(false)
+  const [selectedSnapshot, setSelectedSnapshot] = useState<{ snapshot: FsSnapshot; nodes: FsNode[] } | null>(null)
+  const [snapshotLoading, setSnapshotLoading] = useState(false)
+
+  const INPUT: CSSProperties = {
+    height: 28, padding: '0 8px', background: 'var(--bg-elev-2)', border: '1px solid var(--border)',
+    borderRadius: 'var(--radius-sm)', color: 'var(--text)', fontSize: 12, fontFamily: 'inherit', outline: 'none',
+  }
+  const SECTION: CSSProperties = {
+    background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 16,
+  }
+
+  async function handleGenerate(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    setGenError(null)
+    setBash(null)
+    setPs1(null)
+    setGenLoading(true)
+    try {
+      const data = await api.post<{ bash: string; ps1: string }>(
+        `/servers/${serverId}/fs/generate-script`,
+        { root: genRoot, maxDepth: parseInt(genDepth, 10) },
+      )
+      setBash(data.bash)
+      setPs1(data.ps1)
+    } catch (err) {
+      setGenError(err instanceof ApiError ? err.message : 'Failed to generate script')
+    } finally {
+      setGenLoading(false)
+    }
+  }
+
+  const loadSnapshots = useCallback(async () => {
+    setSnapshotsLoading(true)
+    try {
+      const data = await api.get<{ snapshots: FsSnapshot[] }>(`/servers/${serverId}/fs/snapshots`)
+      setSnapshots(data.snapshots)
+    } catch {
+      // silently fail
+    } finally {
+      setSnapshotsLoading(false)
+    }
+  }, [serverId])
+
+  useEffect(() => { void loadSnapshots() }, [loadSnapshots])
+
+  async function handleImport(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    setImportError(null)
+    setImportResult(null)
+    setImportLoading(true)
+    try {
+      const data = await api.post<{ snapshot: FsSnapshot }>(
+        `/servers/${serverId}/fs/import`,
+        { json: importJson },
+      )
+      setImportResult(data.snapshot)
+      setImportJson('')
+      // Refresh snapshots list
+      void loadSnapshots()
+    } catch (err) {
+      setImportError(err instanceof ApiError ? err.message : 'Import failed')
+    } finally {
+      setImportLoading(false)
+    }
+  }
+
+  async function handleSelectSnapshot(snap: FsSnapshot) {
+    if (selectedSnapshot?.snapshot.id === snap.id) {
+      setSelectedSnapshot(null)
+      return
+    }
+    setSnapshotLoading(true)
+    try {
+      const data = await api.get<{ snapshot: FsSnapshot; nodes: FsNode[] }>(
+        `/servers/${serverId}/fs/snapshots/${snap.id}`,
+      )
+      setSelectedSnapshot(data)
+    } catch {
+      // silently fail
+    } finally {
+      setSnapshotLoading(false)
+    }
+  }
+
+  function copyToClipboard(text: string) {
+    void navigator.clipboard.writeText(text)
+  }
+
+  const TR: CSSProperties = { height: 32, borderBottom: '1px solid var(--border)' }
+  const TD: CSSProperties = { padding: '0 10px', fontSize: 12, color: 'var(--text)' }
+  const TH: CSSProperties = { ...TD, fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600 }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Generate Script */}
+      <div style={SECTION}>
+        <p style={{ ...FIELD_LABEL, marginBottom: 10 }}>Generate Collection Script</p>
+        <p style={{ margin: '0 0 12px', fontSize: 12, color: 'var(--text-muted)' }}>
+          Run this script on the target server to collect its filesystem tree and paste the output below.
+        </p>
+        <form onSubmit={(e) => { void handleGenerate(e) }} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {genError && <p style={{ margin: 0, fontSize: 12, color: 'var(--danger)' }}>{genError}</p>}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', flex: '1 1 200px' }}>
+              Root path
+              <input
+                value={genRoot}
+                onChange={(e) => setGenRoot(e.target.value)}
+                placeholder="/"
+                required
+                style={INPUT}
+              />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', flex: '0 0 100px' }}>
+              Max depth
+              <input
+                type="number" min={1} max={20}
+                value={genDepth}
+                onChange={(e) => setGenDepth(e.target.value)}
+                style={INPUT}
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={genLoading}
+              style={{ height: 28, padding: '0 12px', background: 'var(--accent)', border: 'none', borderRadius: 'var(--radius-sm)', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', opacity: genLoading ? 0.6 : 1 }}
+            >
+              {genLoading ? 'Generating…' : 'Generate'}
+            </button>
+          </div>
+        </form>
+
+        {bash && (
+          <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>Bash (Linux/macOS)</span>
+                <button onClick={() => copyToClipboard(bash!)} style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', color: 'var(--text-muted)', fontSize: 11, cursor: 'pointer', padding: '2px 8px', fontFamily: 'inherit' }}>Copy</button>
+              </div>
+              <textarea
+                readOnly
+                value={bash}
+                rows={6}
+                style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 11, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', color: 'var(--text)', padding: 8, resize: 'vertical', boxSizing: 'border-box' }}
+              />
+            </div>
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>PowerShell (Windows)</span>
+                <button onClick={() => copyToClipboard(ps1!)} style={{ background: 'none', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', color: 'var(--text-muted)', fontSize: 11, cursor: 'pointer', padding: '2px 8px', fontFamily: 'inherit' }}>Copy</button>
+              </div>
+              <textarea
+                readOnly
+                value={ps1!}
+                rows={6}
+                style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 11, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', color: 'var(--text)', padding: 8, resize: 'vertical', boxSizing: 'border-box' }}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Import Snapshot */}
+      {canWrite && (
+        <div style={SECTION}>
+          <p style={{ ...FIELD_LABEL, marginBottom: 10 }}>Import Snapshot</p>
+          <p style={{ margin: '0 0 12px', fontSize: 12, color: 'var(--text-muted)' }}>
+            Paste the JSON output from the collection script here and click Import.
+          </p>
+          <form onSubmit={(e) => { void handleImport(e) }} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {importError && <p style={{ margin: 0, fontSize: 12, color: 'var(--danger)' }}>{importError}</p>}
+            {importResult && (
+              <div style={{ padding: '8px 10px', background: 'color-mix(in srgb, var(--success) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--success) 30%, transparent)', borderRadius: 'var(--radius-sm)', fontSize: 12, color: 'var(--success)' }}>
+                Imported snapshot <span style={{ fontFamily: 'var(--font-mono)' }}>{importResult.id.slice(0, 8)}…</span> with {importResult.nodeCount} nodes.
+              </div>
+            )}
+            <textarea
+              value={importJson}
+              onChange={(e) => setImportJson(e.target.value)}
+              placeholder={'Paste JSON output here…\n{"schema":"bi-ro.fstree.v1", ...}'}
+              rows={8}
+              required
+              style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 11, background: 'var(--bg-elev-2)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', color: 'var(--text)', padding: 8, resize: 'vertical', boxSizing: 'border-box', outline: 'none' }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                type="submit"
+                disabled={importLoading || !importJson.trim()}
+                style={{ height: 28, padding: '0 12px', background: 'var(--accent)', border: 'none', borderRadius: 'var(--radius-sm)', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', opacity: (importLoading || !importJson.trim()) ? 0.6 : 1 }}
+              >
+                {importLoading ? 'Importing…' : 'Import'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Snapshots list */}
+      <div style={SECTION}>
+        <p style={{ ...FIELD_LABEL, marginBottom: 10 }}>Snapshots</p>
+        {snapshotsLoading && <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)' }}>Loading…</p>}
+        {snapshots !== null && snapshots.length === 0 && (
+          <p style={{ margin: 0, fontSize: 13, color: 'var(--text-muted)' }}>No snapshots yet. Generate and import a script to capture this server's filesystem.</p>
+        )}
+        {snapshots !== null && snapshots.length > 0 && (
+          <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                  <th style={TH}>Root path</th>
+                  <th style={TH}>Host</th>
+                  <th style={TH}>Depth</th>
+                  <th style={TH}>Nodes</th>
+                  <th style={TH}>Generated</th>
+                  <th style={TH} />
+                </tr>
+              </thead>
+              <tbody>
+                {snapshots.map((snap) => (
+                  <Fragment key={snap.id}>
+                    <tr
+                      style={{ ...TR, cursor: 'pointer', background: selectedSnapshot?.snapshot.id === snap.id ? 'color-mix(in srgb, var(--accent) 6%, transparent)' : undefined }}
+                      onClick={() => { void handleSelectSnapshot(snap) }}
+                    >
+                      <td style={{ ...TD, fontFamily: 'var(--font-mono)' }}>{snap.rootPath}</td>
+                      <td style={{ ...TD, color: 'var(--text-muted)' }}>{snap.host}</td>
+                      <td style={{ ...TD, color: 'var(--text-muted)' }}>{snap.maxDepth}</td>
+                      <td style={{ ...TD, color: 'var(--text-muted)' }}>{snap.nodeCount.toLocaleString()}</td>
+                      <td style={{ ...TD, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>{new Date(snap.generatedAt).toLocaleString()}</td>
+                      <td style={{ ...TD, color: 'var(--accent)', fontSize: 11 }}>
+                        {selectedSnapshot?.snapshot.id === snap.id ? 'Collapse' : 'View'}
+                      </td>
+                    </tr>
+                    {selectedSnapshot?.snapshot.id === snap.id && (
+                      <tr key={`${snap.id}-detail`}>
+                        <td colSpan={6} style={{ padding: '8px 10px', background: 'var(--bg-elev)' }}>
+                          {snapshotLoading ? (
+                            <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)' }}>Loading nodes…</p>
+                          ) : (
+                            <FolderTree
+                              nodes={selectedSnapshot.nodes as FsTreeNode[]}
+                              snapshotId={selectedSnapshot.snapshot.id}
+                              host={selectedSnapshot.snapshot.host}
+                              rootPath={selectedSnapshot.snapshot.rootPath}
+                            />
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
