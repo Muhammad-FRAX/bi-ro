@@ -14,6 +14,9 @@ import healthRouter from './routes/health.ts'
 import { authRouter } from './routes/auth.ts'
 import { setupRouter } from './routes/setup.ts'
 import { adminRouter } from './routes/admin.ts'
+import { serversRouter } from './routes/servers.ts'
+import { appsRouter } from './routes/apps.ts'
+import { connectionsRouter } from './routes/connections.ts'
 import { initConfig, getConfig } from './config.ts'
 import { runMigrations } from './db/migrate.ts'
 import { initPool, getPool } from './db/pool.ts'
@@ -51,6 +54,9 @@ export function createApp(opts?: AppOptions): express.Express {
     }))
     app.use('/api', authRouter(opts.pool))
     app.use('/api', adminRouter(opts.pool))
+    app.use('/api', serversRouter(opts.pool))
+    app.use('/api', appsRouter(opts.pool))
+    app.use('/api', connectionsRouter(opts.pool))
   }
 
   app.use('/api', healthRouter)
