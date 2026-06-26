@@ -139,11 +139,20 @@ roles.manage          settings.manage      api_keys.manage     audit.read
 
 ### 4.1 Infrastructure documentation
 
-**Servers.** Each server record holds: hostname, aliases, IP(s), environment
+**Servers.** Each server record holds: hostname, aliases, IP(s), a short
+**description** (one-line "what this box is for"), environment
 (`prod` / `staging` / `dev` / `other`), OS + version, location/datacenter/cloud,
-CPU/RAM/disk notes, owner, status (`active` / `decommissioned` / `maintenance`),
-free-text notes, tags, and relationships to ports, apps, users/credentials,
+provider, CPU/RAM/disk notes, owner, **criticality** (`critical` / `high` /
+`normal` / `low`), status (`active` / `decommissioned` / `maintenance`), a quick
+free-text note, tags, and relationships to ports, apps, users/credentials,
 folder trees, and documents.
+
+**Notes tab.** Beyond the one-line description and the quick note, each server
+detail page has a dedicated **Notes tab** — a running log of **dated, authored,
+markdown** entries (gotchas, change history, "don't reboot during ETL", contacts,
+etc.). Entries are listed newest-first with author + timestamp; anyone with edit
+rights can add one, and they are never silently overwritten (each is its own row).
+The same notes pattern is available on apps and scripts.
 
 **Tags.** Free-form, color-coded labels (e.g. `etl`, `reporting`, `legacy`,
 `pci`). Filterable everywhere. Tags are first-class entities so renames propagate.
@@ -238,8 +247,12 @@ username, `last_changed_at`, and `days_remaining` badges.
 
 ### 4.5 Expiry tracking, notifications & email
 
-- A **daily background worker** (node-cron) scans all secrets (and certificates,
-  §5) and computes days-to-expiry.
+- A **daily local countdown engine** (node-cron) reads **only BI-Ro's own
+  database** — never any server — and computes days-to-expiry for each tracked
+  credential (and certificates, §5) from its `last_changed_at` + period. It makes
+  **no outbound connection of any kind except SMTP**. "Worker" here means an
+  in-process timer that counts down dates already stored locally; it does not
+  discover, probe, or connect to anything on your fleet.
 - **Thresholds** (configurable, defaults 7 days, 2 days, and at/after expiry)
   generate **in-app notifications** and **emails**.
 - **Dashboard** shows an "Expiring soon" widget (sorted by urgency) and a count
@@ -255,11 +268,17 @@ username, `last_changed_at`, and `days_remaining` badges.
 touches your fleet. The cycle is entirely manual and passive: per server you can
 track **multiple users' credentials**, each with its own settable expiry period
 (`rotation_period_days`) or explicit `expires_at`. When someone changes a
-password **on the server itself**, they come to BI-Ro and enter the new value;
-saving it **restarts that credential's cycle** — resets `last_changed_at`,
-recomputes the next-due date, writes a history entry, and re-arms the 7/2/0
-warnings. The worker only reads BI-Ro's own database to compute days-remaining
-and send warnings; it makes no outbound connection except SMTP.
+password **on the server itself**, they come to BI-Ro and enter the new value.
+**Saving a new secret value requires step-up re-auth — the user re-enters their
+credentials per the active auth mode (self → password recheck, Keycloak → OIDC
+step-up, LDAP → re-bind), exactly like reveal (§6.4)** — and the change is audited.
+On a confirmed save the app **restarts that credential's cycle**: resets
+`last_changed_at`, recomputes the next-due date from the period the app user chose,
+writes an encrypted history entry, and re-arms the 7/2/0 warnings. From that point
+the countdown engine simply decrements days-remaining locally and alerts when few
+days remain. The engine only reads BI-Ro's own database; it makes no outbound
+connection except SMTP. The expiry period is **per credential** and **set by the
+BI-Ro user** (multiple users/credentials per server, each on its own timer).
 
 **Local worker heartbeat (folded recommendation).** The worker writes
 `last_successful_scan_at`; the dashboard surfaces it and an admin alert fires if
@@ -414,6 +433,11 @@ secret value without a committed audit record. Order is strict: step-up → auth
 guard (rate-limit + temporary lockout) on login and step-up ships **with the
 reveal endpoint in P4**, not later (F3.1).
 
+**Writing a secret value is also step-up-gated.** Creating or changing a stored
+secret value (the manual rotation in §4.5) requires the same fresh re-auth as a
+reveal and is audited. Metadata-only edits (title, tags, notes, period) do not
+require step-up; only operations that touch the plaintext value do.
+
 ### 6.5 Audit log
 
 Append-only table capturing security-relevant events: logins, reveals, secret
@@ -442,6 +466,17 @@ the app.
 `AUTH_MODE` ∈ `{ self | keycloak | ldap }`, set in env and confirmed in the
 **first-launch setup wizard** (which also seeds the first admin, sets `APP_TITLE`,
 accent, SMTP, and the KEK presence check). Mode is immutable afterwards.
+
+**Mode-specific connection details come from env, and the app prompts when they
+are missing.** The mode itself (`AUTH_MODE`) and the KEK are hard requirements —
+the app refuses to start without them. But the per-mode *connection details*
+(Keycloak issuer/client/secret/redirect; LDAP host/baseDN/bindDN/filter) are read
+from env first and, **if any required value for the active mode is absent or
+fails its validation check**, the app does **not** crash: it boots into a
+**"configuration required" state** where the setup wizard asks an admin to enter
+the missing details. The wizard validates them live (OIDC discovery for Keycloak,
+a test bind for LDAP) before activating the mode, and persists them to settings.
+`.env.example` documents every key so the env-only path stays the happy path.
 
 An **`AuthProvider` interface** abstracts the three modes:
 
@@ -509,8 +544,12 @@ user_roles(user_id, role_id)
 user_permission_overrides(user_id, permission, allow)
 
 -- infra
-servers(id, hostname, ips jsonb, environment, os, location, owner_id,
-        status, notes, created_at, updated_at, deleted_at)
+servers(id, hostname, ips jsonb, description, environment, os, location,
+        provider, criticality, owner_id, status, notes, created_at,
+        updated_at, deleted_at)
+   -- description: one-line summary; notes: quick free-text; criticality: critical|high|normal|low
+server_notes(id, server_id, body, author_id, created_at, updated_at)
+   -- the Notes tab: dated, authored, markdown entries (newest-first), one row each
 tags(id, name, color)
 server_tags(server_id, tag_id)
 apps(id, name, category, vendor, version, eol_date?, logo_url, docs_url, notes)
@@ -779,7 +818,11 @@ bi-ro/
   `BIRO_MASTER_KEK`, `DATABASE_URL`, `JWT_SECRET`, SMTP_* , Keycloak_* / LDAP_*
   (mode-dependent), `EXPIRY_THRESHOLDS`.
 - **Boot checks:** app refuses to start if `BIRO_MASTER_KEK` is missing/short or
-  `AUTH_MODE` is invalid. Runs migrations on start (idempotent).
+  `AUTH_MODE` is invalid (hard requirements). If the active mode's **connection
+  details** (Keycloak/LDAP) are missing or fail validation, the app still boots but
+  enters a **"configuration required"** state and the setup wizard collects +
+  validates them (§7.1) before login is enabled — it does not crash. Runs
+  migrations on start (idempotent).
 - **TLS:** terminate at a reverse proxy in front (documented in README); app sets
   secure-cookie + HSTS behind it.
 - Single host (D3); no orchestration/HA in v1.
@@ -807,11 +850,12 @@ pass.
   empty dashboard; RBAC blocks an unauthorized route.
 
 ### Phase 2 — Infrastructure documentation
-- Servers CRUD + tags + environments; apps catalog; ports + app-on-port; basic
-  connections. DataTable list views + server detail page (overview/ports/apps/
-  docs tabs). Filters by env/tag/status.
-- **Done:** can document a server end-to-end with ports, apps, tags; list filters
-  work; viewer role sees infra but no secrets.
+- Servers CRUD (description/criticality/provider) + tags + environments; apps
+  catalog; ports + app-on-port; basic connections. DataTable list views + server
+  detail page (overview/ports/apps/**notes**/docs tabs, notes = dated authored
+  markdown entries). Filters by env/tag/status.
+- **Done:** can document a server end-to-end with ports, apps, tags, and dated
+  notes; list filters work; viewer role sees infra but no secrets.
 
 ### Phase 3 — Visualizations & filesystem mapping
 - TopologyCanvas (React Flow) for fleet + per-server; port map; blast-radius
@@ -1031,15 +1075,18 @@ P9  Polish+harden    → C9.1 search+command palette  C9.2 soft-delete+recycle  
   admin pages.
 
 **C2.1 — Infra schema**
-- Read: §4.1, §8. Build: migration `servers, tags, server_tags, apps, ports,
-  connections`.
-- Gate: migrate applies; FKs and enums (environment/exposure/status) enforced.
+- Read: §4.1, §8. Build: migration `servers, server_notes, tags, server_tags,
+  apps, ports, connections` (servers include description/criticality/provider).
+- Gate: migrate applies; FKs and enums (environment/exposure/status/criticality)
+  enforced.
 
 **C2.2 — Servers + tags (API + UI)**
-- Read: §4.1, §10. Build: servers CRUD + tags CRUD; servers list (filters: env,
-  tag, status) + server detail (overview tab).
-- Gate: document a server end-to-end; filters work; `viewer` sees it, no secrets
-  anywhere yet.
+- Read: §4.1, §10. Build: servers CRUD (description/criticality/provider + quick
+  note) + tags CRUD; `server_notes` CRUD; servers list (filters: env, tag, status)
+  + server detail with **overview** and **Notes** tabs (dated, authored, markdown
+  entries, newest-first).
+- Gate: document a server end-to-end incl. adding a couple of dated notes; filters
+  work; `viewer` sees it, no secrets anywhere yet.
 
 **C2.3 — Apps catalog + ports**
 - Read: §4.1. Build: apps CRUD (logo, version, EOL); ports CRUD bound to
@@ -1098,11 +1145,15 @@ P9  Polish+harden    → C9.1 search+command palette  C9.2 soft-delete+recycle  
   one audit row per reveal with actor/ip/ts.
 
 **C4.4 — History + generator + vault UI**
-- Read: §4.4, §5. Build: `secret_history` (encrypted prior values on change);
-  password generator; vault list/detail + secret detail pages; server detail
-  "credentials" tab showing `last_changed_at` + `days_remaining`.
-- Gate: rotating a secret writes history; generator produces to policy; server tab
-  lists its credentials with expiry badges.
+- Read: §4.4, §4.5, §5, §6.4. Build: `secret_history` (encrypted prior values on
+  change); **secret value create/update gated by the same step-up + audit as reveal**
+  (metadata-only edits are not gated); saving a new value resets `last_changed_at`,
+  recomputes next-due, re-arms warnings; password generator; vault list/detail +
+  secret detail pages; server detail "credentials" tab showing `last_changed_at` +
+  `days_remaining`.
+- Gate: changing a secret value requires step-up + writes one audit row + writes
+  history + resets the countdown; a metadata-only edit does not require step-up;
+  generator produces to policy; server tab lists its credentials with expiry badges.
 
 **C5.1 — Notification center**
 - Read: §4.5, §8. Build: `notifications, notification_deliveries,
@@ -1146,17 +1197,22 @@ P9  Polish+harden    → C9.1 search+command palette  C9.2 soft-delete+recycle  
 - Gate: self mode still fully works through the interface only (no direct calls).
 
 **C7.2 — Keycloak mode + test compose**
-- Read: §7.3, §13, §18 Q3. Build: `auth/keycloak.js` (OIDC code+PKCE,
-  group/role→role mapping, OIDC step-up for reveal); env-only connection (no
-  Keycloak in app compose); ship `keycloak.test.compose.yaml` for local testing.
-  **Confirm Q3 details first.**
+- Read: §7.1, §7.3, §13, §18 Q3. Build: `auth/keycloak.js` (OIDC code+PKCE,
+  group/role→role mapping, OIDC step-up for reveal); env-first connection (no
+  Keycloak in app compose) with the **"configuration required" wizard fallback**
+  (§7.1): if Keycloak env vars are missing/invalid, boot into the wizard, collect +
+  validate via OIDC discovery, persist; ship `keycloak.test.compose.yaml` for local
+  testing. **Confirm Q3 details first.**
 - Gate: with `AUTH_MODE=keycloak` against the test Keycloak, a mapped user logs in
-  and a reveal performs an OIDC step-up.
+  and a reveal performs an OIDC step-up; with Keycloak vars unset, the app boots
+  into the config wizard instead of crashing.
 
 **C7.3 — LDAP mode**
-- Read: §7.4, §18 Q3. Build: `auth/ldap.js` (bind/search, group→role mapping,
-  re-bind step-up); env config.
-- Gate: with `AUTH_MODE=ldap`, a directory user logs in and reveal re-binds.
+- Read: §7.1, §7.4, §18 Q3. Build: `auth/ldap.js` (bind/search, group→role mapping,
+  re-bind step-up); env-first config with the same **"configuration required"
+  wizard fallback** (validate via a test bind, persist).
+- Gate: with `AUTH_MODE=ldap`, a directory user logs in and reveal re-binds; with
+  LDAP vars unset, the app boots into the config wizard instead of crashing.
 
 **C7.4 — TOTP (self mode)**
 - Read: §5, §7.2. Build: TOTP enrollment + verification at login and as a step-up
