@@ -4,6 +4,9 @@ import { SetupPage } from './pages/SetupPage.tsx'
 import { LoginPage } from './pages/LoginPage.tsx'
 import { DashboardPage } from './pages/DashboardPage.tsx'
 import { SettingsPage } from './pages/SettingsPage.tsx'
+import { ServersPage } from './pages/ServersPage.tsx'
+import { ServerDetailPage } from './pages/ServerDetailPage.tsx'
+import { AppsPage } from './pages/AppsPage.tsx'
 import { api } from './lib/api.ts'
 
 type AppState = 'loading' | 'setup' | 'login' | 'app'
@@ -151,6 +154,32 @@ export default function App() {
     return (
       <ThemeProvider>
         <SettingsPage {...sharedProps} />
+      </ThemeProvider>
+    )
+  }
+
+  if (currentPath === '/servers') {
+    return (
+      <ThemeProvider>
+        <ServersPage {...sharedProps} />
+      </ThemeProvider>
+    )
+  }
+
+  // /servers/:id — match server detail route
+  const serverDetailMatch = currentPath.match(/^\/servers\/([^/]+)$/)
+  if (serverDetailMatch) {
+    return (
+      <ThemeProvider>
+        <ServerDetailPage serverId={serverDetailMatch[1]!} {...sharedProps} />
+      </ThemeProvider>
+    )
+  }
+
+  if (currentPath === '/apps') {
+    return (
+      <ThemeProvider>
+        <AppsPage {...sharedProps} />
       </ThemeProvider>
     )
   }

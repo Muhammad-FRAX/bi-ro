@@ -12,7 +12,7 @@ interface DataTableProps<T extends object> {
   rows: T[]
   keyField: keyof T & string
   loading?: boolean
-  emptyMessage?: string
+  emptyMessage?: ReactNode
   rowActions?: (row: T) => ReactNode
 }
 
