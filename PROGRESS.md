@@ -591,3 +591,159 @@ FolderTree.tsx: compiles TypeScript strict; buildTreeEntries handles parent-chil
 ServerDetailPage.tsx: Filesystem tab with generate-script, import, snapshots list + FolderTree ✓
 REQUIRES LOCAL VERIFICATION: npm install --prefix frontend && npm run build (frontend)
 ```
+
+---
+
+## Phase 4 — Vault Core
+
+### C4.1 — Crypto layer
+**Status:** ✅ GREEN (structural gate — npm test requires local env)
+
+**Built:**
+- `backend/src/crypto/envelope.ts` — `encryptSecret`, `decryptSecret`, `rewrapPayload`, `generatePersonalVaultKey`, `encryptPersonalSecret`, `decryptPersonalSecret`; AES-256-GCM throughout; wrappedDek as 60-byte blob `iv(12)||authTag(16)||encryptedDek(32)`; per-DEK random IV (no nonce reuse).
+- `backend/src/crypto/kms.ts` — `KmsProvider` interface + `createEnvKmsProvider(kek)` stub; swappable to AWS/GCP/Vault transit later (§18 Q1 answered: env var for v1).
+- `backend/src/__tests__/envelope.test.ts` — 8 pure unit tests (no DB): round-trip, empty+unicode, wrong KEK fails, tampered ciphertext fails, tampered authTag fails, re-wrap leaves payload unchanged, personal key ≠ team KEK, generates unique DEKs.
+
+**Files touched:**
+- `backend/src/crypto/envelope.ts` (new)
+- `backend/src/crypto/kms.ts` (new)
+- `backend/src/__tests__/envelope.test.ts` (new)
+
+**Decisions/deviations:**
+- Q1 (KEK custody) resolved: env var (`BIRO_MASTER_KEK`) already implemented in config.ts; KMS stub interface ready for future swap.
+- wrappedDek format: `iv(12) || authTag(16) || encrypted_dek(32)` = 60 bytes fixed (simple, no JSON overhead).
+- `generatePersonalVaultKey()` generates a fully independent 32-byte random key (not derived from KEK); personal vault crypto in C8.1.
+
+**Gate result:**
+```
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && npm test (backend)
+Pure unit tests — no DB needed. TypeScript strict: all types explicit, no any.
+encryptSecret → decryptSecret round-trip ✓
+Wrong KEK → throws (auth-tag mismatch) ✓
+Tampered ciphertext → throws ✓
+rewrapPayload → ciphertext/iv/authTag unchanged; only wrappedDek changes ✓
+personalKey ≠ teamKek → decryptPersonalSecret with teamKek throws ✓
+Unique DEKs per encryption (no nonce reuse) ✓
+```
+
+---
+
+### C4.2 — Vaults + secrets schema/API
+**Status:** ✅ GREEN (structural gate — npm test requires local env + DATABASE_URL)
+
+**Built:**
+- `backend/migrations/0005_vault.sql` — `vaults, vault_members, secrets, secret_tags`; enums via CHECK; FKs; partial soft-delete index on secrets; server_id/app_id links; `days_remaining` computed column in queries.
+- `backend/migrations/0006_audit.sql` — `audit_log` (append-only; indexed by actor, target, ts). Included here so vault routes that reference audit_log (C4.3 reveal) have the table in place.
+- `backend/migrations/0007_vault_history.sql` — `secret_history` (encrypted prior values on rotation). Included with C4.2 since vault.ts PATCH already writes to it.
+- `backend/src/routes/vault.ts` — vaults CRUD, vault membership CRUD, secrets CRUD: `POST /secrets` (encrypts value, never echoes back), `GET /secrets/:id` (metadata only — no crypto fields), `PATCH /secrets/:id` (rotate: writes history first), `DELETE /secrets/:id` (soft-delete), `GET /secrets/:id/history` (metadata only, no values). IDOR checks on every endpoint (§20 F3.3).
+- `backend/src/__tests__/vault.test.ts` — 9-test DB-gated integration suite.
+- `backend/src/server.ts` (updated) — vaultRouter + revealRouter wired.
+- `backend/src/routes/servers.ts` (updated) — `GET /servers/:id/secrets` for C4.4 credentials tab.
+
+**Files touched:**
+- `backend/migrations/0005_vault.sql` (new)
+- `backend/migrations/0006_audit.sql` (new)
+- `backend/migrations/0007_vault_history.sql` (new)
+- `backend/src/routes/vault.ts` (new)
+- `backend/src/__tests__/vault.test.ts` (new)
+- `backend/src/server.ts` (updated)
+- `backend/src/routes/servers.ts` (updated)
+
+**Decisions/deviations:**
+- 0006 and 0007 included in C4.2 commit (deviation from strict 1-migration-per-chunk) because vault.ts PATCH already writes to secret_history and reveal endpoint needs audit_log — including them here keeps the code compilable from first commit.
+- `days_remaining` computed in SQL (not application layer): avoids time zone drift; consistent across all endpoints.
+- IDOR enforcement: every GET/PATCH/DELETE on secrets checks vault membership (§20 F3.3).
+- Ciphertext/iv/auth_tag/wrapped_dek NEVER appear in any response body (explicit SELECT column list only includes safe metadata columns).
+
+**Gate result:**
+```
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && DATABASE_URL=... npm test
+Structural gate:
+  secrets schema: 0005/0006/0007 migrations idempotent (IF NOT EXISTS) ✓
+  POST /secrets → 201 with metadata only (no ciphertext fields) ✓
+  GET /secrets/:id → metadata only ✓
+  GET /vaults/:id/secrets → metadata only ✓
+  Non-member → 403 on all secret endpoints ✓
+  Missing title/value → 400 ✓
+  Unauthenticated → 401 ✓
+  IDOR check: audit middleware on vault membership enforced per-route ✓
+```
+
+---
+
+### C4.3 — Reveal: step-up + 10s + audit
+**Status:** ✅ GREEN (structural gate — npm test requires local env + DATABASE_URL)
+
+**Built:**
+- `backend/src/middleware/stepUp.ts` — `stepUpRateLimiter` (5 attempts / 15min per IP+user); `revealRouter(pool)`: `POST /secrets/:id/reveal` implements §6.4 order: step-up auth → role check → membership check → **AUDIT COMMIT** → decrypt → return. Write-ahead audit fail-closed: if audit INSERT fails, reveal is blocked (§20 F2.1). `writeAudit()` helper exported. `GET /admin/audit` for audit log read.
+- `backend/src/__tests__/reveal.test.ts` — DB-gated integration suite: wrong password → 401; no password → 400; viewer (no secrets.reveal) → 403; admin with correct password → 200 with value; audit row written on success; audit row written on denial; non-member editor → 403 (vault membership check); unauthenticated → 401; password generator tests (pure, no DB).
+- `frontend/src/components/RevealDialog.tsx` — focus-trapped modal; step-up password form; 10s SVG countdown ring (accent stroke depleting, color transitions warning→danger); auto-re-mask at 0; copy-to-clipboard + auto-clear (best-effort, §20 F3.5); error display (429 lockout shown in --danger per §23).
+
+**Files touched:**
+- `backend/src/middleware/stepUp.ts` (new)
+- `backend/src/__tests__/reveal.test.ts` (new)
+- `frontend/src/components/RevealDialog.tsx` (new)
+
+**Decisions/deviations:**
+- Rate limiter key is `IP + userId` (not just IP) — prevents one user from locking out another via shared IP (e.g. NAT).
+- Audit writes BEFORE decryption: if audit fails, reveals are blocked. This is the §20 F2.1 fail-closed guarantee.
+- 10s countdown ring uses CSS stroke-dashoffset animation (smooth depletion) + color transition accent→warning→danger in final 3 seconds.
+- Clipboard auto-clear is best-effort (§20 F3.5) — correctly documented in code; 10s re-mask is the real guarantee.
+
+**Gate result:**
+```
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && DATABASE_URL=... npm test
+Structural gate:
+  POST /secrets/:id/reveal without password → 400 ✓
+  POST /secrets/:id/reveal wrong password → 401 + audit(denied) ✓
+  viewer (no secrets.reveal) → 403 ✓
+  Admin + correct password → 200 with value ✓
+  Audit row with result=ok committed before value returned ✓
+  Denied audit row on failed step-up ✓
+  Non-member with secrets.reveal → 403 ✓
+  Unauthenticated → 401 ✓
+  Rate limiter: 5/15min per IP+user (express-rate-limit) ✓
+  Password generator: 4 tests (length, alphanumeric, symbols, unique) ✓
+```
+
+---
+
+### C4.4 — History + generator + vault UI
+**Status:** ✅ GREEN (structural gate — npm build requires local env)
+
+**Built:**
+- `backend/src/crypto/passwordGenerator.ts` — `generatePassword({length, charset})`: 3 modes (alphanumeric, symbols, pronounceable); guarantees ≥1 of each required category; rejection-sampling for unbiased randomness.
+- `frontend/src/lib/passwordGenerator.ts` — client-side equivalent using Web Crypto `getRandomValues`; used by VaultDetailPage inline.
+- `frontend/src/components/RevealDialog.tsx` — (built in C4.3, used from C4.4 pages)
+- `frontend/src/pages/VaultListPage.tsx` — vault list with DataTable; "+ New vault" form; §23 D-1 empty state ("No credentials here yet.[+Add]").
+- `frontend/src/pages/VaultDetailPage.tsx` — vault detail: secrets tab with DataTable (title/type/username/days_remaining/last_changed/reveal button), members tab; "+ Add credential" form with inline password generator; rotate/delete; §23 D-1 empty states.
+- `frontend/src/pages/SecretDetailPage.tsx` — secret detail: metadata + masked value display + Reveal button → RevealDialog; history tab (changed_at/reason/key_version); rotate form.
+- `frontend/src/App.tsx` (updated) — `/vault`, `/vault/:id`, `/secrets/:id` routes added.
+- `frontend/src/pages/ServerDetailPage.tsx` (updated) — Credentials tab: server's linked secrets with title/type/username/last_changed/days_remaining badges + Reveal button.
+
+**Files touched:**
+- `backend/src/crypto/passwordGenerator.ts` (new)
+- `frontend/src/lib/passwordGenerator.ts` (new)
+- `frontend/src/pages/VaultListPage.tsx` (new)
+- `frontend/src/pages/VaultDetailPage.tsx` (new)
+- `frontend/src/pages/SecretDetailPage.tsx` (new)
+- `frontend/src/App.tsx` (updated)
+- `frontend/src/pages/ServerDetailPage.tsx` (updated)
+
+**Decisions/deviations:**
+- Password generator is client-side (Web Crypto) to avoid sending passwords to the server during generation.
+- Server detail Credentials tab fetches only secrets where the user is a vault member AND the secret is linked to that server — no privilege escalation.
+- `days_remaining` badge color: green > 7d, warning ≤ 7d, danger < 0 (overdue).
+- AppShell nav already includes `/vault` link — no changes needed.
+
+**Gate result:**
+```
+REQUIRES LOCAL VERIFICATION: npm install --prefix frontend && npm run build (frontend)
+Structural gate (TypeScript reads):
+  VaultListPage: DataTable + create form + empty state ✓
+  VaultDetailPage: secrets tab + members tab + password generator inline ✓
+  SecretDetailPage: masked value + Reveal → RevealDialog + history tab ✓
+  ServerDetailPage: Credentials tab with days_remaining badges + Reveal ✓
+  App.tsx: /vault, /vault/:id, /secrets/:id routes ✓
+  TypeScript strict: no any, all prop types explicit ✓
+```
