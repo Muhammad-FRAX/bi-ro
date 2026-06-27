@@ -1,8 +1,10 @@
 import { Router } from 'express'
+import { randomBytes } from 'node:crypto'
 import type { Pool } from 'pg'
 import { requireAuth, requirePermission } from '../middleware/rbac.ts'
 import { hashPassword } from '../auth/self.ts'
 import { buildSmtpConfig, sendEmail, buildNotificationEmailBody } from '../integrations/smtp.ts'
+import { hashApiKey } from '../middleware/apiKey.ts'
 
 export function adminRouter(pool: Pool): Router {
   const router = Router()
@@ -454,6 +456,176 @@ export function adminRouter(pool: Pool): Router {
       )
 
       res.json({ entries: rows })
+    } catch (err) {
+      next(err)
+    }
+  })
+
+  // ── POST /api/admin/api-clients — create API client ──────────────────────
+  // Returns raw key once — only the SHA-256 hash is stored
+  router.post('/admin/api-clients', async (req, res, next) => {
+    try {
+      const { name, scopes, rateLimit } = req.body as {
+        name?: unknown
+        scopes?: unknown
+        rateLimit?: unknown
+      }
+
+      if (typeof name !== 'string' || !name.trim()) {
+        res.status(400).json({ error: 'name is required' })
+        return
+      }
+
+      const resolvedScopes = Array.isArray(scopes) ? scopes.filter((s): s is string => typeof s === 'string') : []
+      const resolvedRateLimit = typeof rateLimit === 'number' && rateLimit > 0 ? rateLimit : 60
+
+      // Generate random API key and hash it for storage
+      const rawKey = randomBytes(32).toString('base64url')
+      const keyHash = hashApiKey(rawKey)
+
+      const { rows } = await pool.query<{ id: string; name: string; created_at: string }>(
+        `INSERT INTO api_clients (name, key_hash, scopes, rate_limit, created_by)
+         VALUES ($1, $2, $3::jsonb, $4, $5)
+         RETURNING id, name, created_at`,
+        [name.trim(), keyHash, JSON.stringify(resolvedScopes), resolvedRateLimit, req.session.userId],
+      )
+
+      // Return raw key once — never retrievable again
+      res.status(201).json({
+        id: rows[0]!.id,
+        name: rows[0]!.name,
+        scopes: resolvedScopes,
+        rateLimit: resolvedRateLimit,
+        createdAt: rows[0]!.created_at,
+        key: rawKey, // shown once only
+      })
+    } catch (err) {
+      next(err)
+    }
+  })
+
+  // ── GET /api/admin/api-clients — list API clients ────────────────────────
+  // Never exposes key_hash or raw key
+  router.get('/admin/api-clients', async (_req, res, next) => {
+    try {
+      const { rows } = await pool.query<{
+        id: string
+        name: string
+        scopes: string[]
+        rate_limit: number
+        created_at: string
+        revoked_at: string | null
+      }>(
+        `SELECT id, name, scopes, rate_limit, created_at, revoked_at
+         FROM api_clients
+         ORDER BY created_at DESC`,
+      )
+      res.json({
+        clients: rows.map((r) => ({
+          id: r.id,
+          name: r.name,
+          scopes: r.scopes,
+          rateLimit: r.rate_limit,
+          createdAt: r.created_at,
+          revokedAt: r.revoked_at,
+          active: r.revoked_at == null,
+        })),
+      })
+    } catch (err) {
+      next(err)
+    }
+  })
+
+  // ── DELETE /api/admin/api-clients/:id — revoke API client ────────────────
+  router.delete('/admin/api-clients/:id', async (req, res, next) => {
+    try {
+      const { rowCount } = await pool.query(
+        `UPDATE api_clients SET revoked_at = NOW() WHERE id = $1 AND revoked_at IS NULL`,
+        [req.params['id']],
+      )
+      if (rowCount === 0) {
+        res.status(404).json({ error: 'API client not found or already revoked' })
+        return
+      }
+      res.json({ ok: true })
+    } catch (err) {
+      next(err)
+    }
+  })
+
+  // ── POST /api/admin/webhook-endpoints — create webhook endpoint ───────────
+  router.post('/admin/webhook-endpoints', async (req, res, next) => {
+    try {
+      const { name, url, secret, events } = req.body as {
+        name?: unknown
+        url?: unknown
+        secret?: unknown
+        events?: unknown
+      }
+
+      if (typeof name !== 'string' || !name.trim()) {
+        res.status(400).json({ error: 'name is required' })
+        return
+      }
+      if (typeof url !== 'string' || !url.trim()) {
+        res.status(400).json({ error: 'url is required' })
+        return
+      }
+      if (typeof secret !== 'string' || !secret) {
+        res.status(400).json({ error: 'secret is required' })
+        return
+      }
+
+      const resolvedEvents = Array.isArray(events)
+        ? events.filter((e): e is string => typeof e === 'string')
+        : ['secret.expiring', 'server.changed']
+
+      const { rows } = await pool.query<{ id: string; name: string; url: string; events: string[]; created_at: string }>(
+        `INSERT INTO webhook_endpoints (name, url, secret, events, created_by)
+         VALUES ($1, $2, $3, $4::jsonb, $5)
+         RETURNING id, name, url, events, created_at`,
+        [name.trim(), url.trim(), secret, JSON.stringify(resolvedEvents), req.session.userId],
+      )
+
+      // Never echo the secret back
+      res.status(201).json({
+        id: rows[0]!.id,
+        name: rows[0]!.name,
+        url: rows[0]!.url,
+        events: rows[0]!.events,
+        createdAt: rows[0]!.created_at,
+      })
+    } catch (err) {
+      next(err)
+    }
+  })
+
+  // ── GET /api/admin/webhook-endpoints — list webhook endpoints ─────────────
+  // Never exposes the HMAC secret
+  router.get('/admin/webhook-endpoints', async (_req, res, next) => {
+    try {
+      const { rows } = await pool.query<{
+        id: string
+        name: string
+        url: string
+        events: string[]
+        enabled: boolean
+        created_at: string
+      }>(
+        `SELECT id, name, url, events, enabled, created_at
+         FROM webhook_endpoints
+         ORDER BY created_at DESC`,
+      )
+      res.json({
+        endpoints: rows.map((r) => ({
+          id: r.id,
+          name: r.name,
+          url: r.url,
+          events: r.events,
+          enabled: r.enabled,
+          createdAt: r.created_at,
+        })),
+      })
     } catch (err) {
       next(err)
     }
