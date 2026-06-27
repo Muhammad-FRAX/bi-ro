@@ -78,23 +78,37 @@ export function adminRouter(pool: Pool): Router {
   })
 
   // ── POST /api/admin/users ────────────────────────────────────────────────
+  // Creates a new user account.
+  // For self mode: email, displayName, role, password (required).
+  // For ldap mode: email, displayName, role, authMode='ldap' (no password — auth is via AD bind).
+  // For keycloak mode: email, displayName, role, authMode='keycloak' (no password — provisioned on first login).
   router.post('/admin/users', async (req, res, next) => {
     const client = await pool.connect()
     try {
-      const { email, displayName, role, password } = req.body as {
+      const { email, displayName, role, password, authMode } = req.body as {
         email?: unknown
         displayName?: unknown
         role?: unknown
         password?: unknown
+        authMode?: unknown
       }
+
+      const resolvedAuthMode = typeof authMode === 'string' && ['self', 'ldap', 'keycloak'].includes(authMode)
+        ? (authMode as 'self' | 'ldap' | 'keycloak')
+        : 'self'
 
       if (
         typeof email !== 'string' || !email.trim() ||
         typeof displayName !== 'string' || !displayName.trim() ||
-        typeof role !== 'string' || !role.trim() ||
-        typeof password !== 'string' || !password
+        typeof role !== 'string' || !role.trim()
       ) {
-        res.status(400).json({ error: 'email, displayName, role, and password are required' })
+        res.status(400).json({ error: 'email, displayName, and role are required' })
+        return
+      }
+
+      // Password required only for self mode
+      if (resolvedAuthMode === 'self' && (typeof password !== 'string' || !password)) {
+        res.status(400).json({ error: 'password is required for self-auth users' })
         return
       }
 
@@ -108,15 +122,23 @@ export function adminRouter(pool: Pool): Router {
         return
       }
 
-      const passwordHash = await hashPassword(password)
+      const passwordHash = resolvedAuthMode === 'self' && typeof password === 'string'
+        ? await hashPassword(password)
+        : null
 
       await client.query('BEGIN')
 
       const { rows: userRows } = await client.query<{ id: string }>(
         `INSERT INTO users (auth_mode, email, display_name, password_hash, status, force_password_change)
-         VALUES ('self', $1, $2, $3, 'active', TRUE)
+         VALUES ($1, $2, $3, $4, 'active', $5)
          RETURNING id`,
-        [email.trim().toLowerCase(), displayName.trim(), passwordHash],
+        [
+          resolvedAuthMode,
+          email.trim().toLowerCase(),
+          displayName.trim(),
+          passwordHash,
+          resolvedAuthMode === 'self', // force_password_change only for self mode
+        ],
       ).catch((err: { code?: string }) => {
         if (err.code === '23505') {
           throw Object.assign(new Error('DUPLICATE'), { isDuplicate: true })
@@ -136,8 +158,9 @@ export function adminRouter(pool: Pool): Router {
           id: userRows[0]!.id,
           email: email.trim().toLowerCase(),
           displayName: displayName.trim(),
+          authMode: resolvedAuthMode,
           role: role.trim(),
-          forcePasswordChange: true,
+          forcePasswordChange: resolvedAuthMode === 'self',
         },
       })
     } catch (err: unknown) {

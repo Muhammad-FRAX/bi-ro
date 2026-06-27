@@ -39,15 +39,15 @@ export function revealRouter(pool: Pool, provider: AuthProvider): Router {
       const ua = req.headers['user-agent'] ?? null
 
       try {
-        // 1. Step-up authentication — delegated to AuthProvider (mode-agnostic)
-        const { password } = req.body as { password?: string }
-        if (!password) {
-          return void res.status(400).json({ error: 'password is required for step-up' })
-        }
+        // 1. Step-up authentication — delegated to AuthProvider (mode-agnostic).
+        // For Keycloak: no password/totpCode needed; lastAuthAt freshness is checked.
+        // For self: password or totpCode required.
+        // For LDAP: password required (re-bind).
+        const { password, totpCode } = req.body as { password?: string; totpCode?: string }
 
         const stepUpOk = await provider.stepUp(
-          { userId, email: req.session.email! },
-          { password },
+          { userId, email: req.session.email!, lastAuthAt: req.session.lastAuthAt },
+          { password, totpCode },
         )
         if (!stepUpOk) {
           // Audit the denied attempt before returning

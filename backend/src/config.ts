@@ -1,3 +1,17 @@
+export interface KeycloakConfig {
+  readonly issuer?: string
+  readonly clientId?: string
+  readonly clientSecret?: string
+  readonly redirectUri?: string
+  readonly defaultRole: string
+}
+
+export interface LdapConfig {
+  readonly url?: string
+  readonly bindTemplate?: string // e.g. "{username}@company.local" — if set, replaces plain email as bind DN
+  readonly tlsEnabled: boolean
+}
+
 export interface Config {
   readonly authMode: 'self' | 'keycloak' | 'ldap'
   readonly kek: Buffer
@@ -10,6 +24,8 @@ export interface Config {
   readonly adminEmail: string | undefined
   readonly adminPassword: string | undefined
   readonly uploadsDir: string
+  readonly keycloak: KeycloakConfig
+  readonly ldap: LdapConfig
 }
 
 const VALID_AUTH_MODES = ['self', 'keycloak', 'ldap'] as const
@@ -60,6 +76,22 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   const adminPassword = env['BIRO_ADMIN_PASSWORD']
   const uploadsDir = env['UPLOADS_DIR'] ?? '/uploads'
 
+  const keycloak: KeycloakConfig = {
+    issuer: env['KEYCLOAK_ISSUER'] ?? env['KEYCLOAK_ISSUER_URL'],
+    clientId: env['KEYCLOAK_CLIENT_ID'],
+    clientSecret: env['KEYCLOAK_CLIENT_SECRET'],
+    redirectUri: env['KEYCLOAK_REDIRECT_URI'],
+    defaultRole: env['KEYCLOAK_DEFAULT_ROLE'] ?? 'viewer',
+  }
+
+  const ldap: LdapConfig = {
+    url: env['LDAP_URL'] ?? (env['LDAP_HOST']
+      ? `ldap://${env['LDAP_HOST']}:${env['LDAP_PORT'] ?? '389'}`
+      : undefined),
+    bindTemplate: env['LDAP_BIND_TEMPLATE'],
+    tlsEnabled: env['LDAP_TLS'] === 'true' || (env['LDAP_URL'] ?? '').startsWith('ldaps://'),
+  }
+
   const cfg = {
     authMode: authMode as 'self' | 'keycloak' | 'ldap',
     kek: kekBytes,
@@ -72,6 +104,8 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     adminEmail,
     adminPassword,
     uploadsDir,
+    keycloak,
+    ldap,
     toJSON() {
       return {
         authMode: this.authMode,
@@ -84,7 +118,12 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
         kek: '[REDACTED]',
         sessionSecret: '[REDACTED]',
         adminPassword: this.adminPassword != null ? '[REDACTED]' : undefined,
-      uploadsDir: this.uploadsDir,
+        uploadsDir: this.uploadsDir,
+        keycloak: {
+          ...this.keycloak,
+          clientSecret: this.keycloak.clientSecret != null ? '[REDACTED]' : undefined,
+        },
+        ldap: this.ldap,
       }
     },
   }

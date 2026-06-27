@@ -10,6 +10,15 @@ declare module 'express-session' {
     displayName: string
     permissions: string[]
     forcePasswordChange: boolean
+    // Timestamp (epoch ms) of the last successful authentication — used by KeycloakProvider step-up
+    lastAuthAt?: number
+    // OIDC PKCE state stored during Keycloak login initiation
+    oidcState?: string
+    oidcCodeVerifier?: string
+    oidcNonce?: string
+    // TOTP enrollment in progress (C7.4)
+    pendingTotpSecret?: string
+    pendingTotpUserId?: string
   }
 }
 
