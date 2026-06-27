@@ -7,7 +7,7 @@
 > expiry tracking, notifications, email alerts, document storage, and a per-user
 > personal vault. Title is env-configurable (`APP_TITLE`, default `BI Root`).
 
-- **Status:** Design — not yet implemented.
+- **Status:** In progress — core features implemented through Phase 9. See §24 for as-built notes on what diverges from this design doc.
 - **Owner:** Mohamed Ali (BI Team).
 - **Stack:** React 19 + Vite + TypeScript (frontend), Node.js + Express 5 (backend), PostgreSQL, Docker.
 - **Image / container:** `bi-ro:v1` / `bi-ro`.
@@ -167,6 +167,18 @@ category, vendor, docs link, version) so the same app (e.g. Postgres, n8n,
 NetBox, Airflow) can appear on many servers/ports and be tracked consistently.
 Optional **EOL/version tracking** (see §5).
 
+**Apps ownership model.** Apps have two modes governed by `vault_id` and `owner_id`:
+
+- **Personal apps** (`vault_id IS NULL`, `owner_id = creator`) — visible **only** to the user who created them. Any authenticated user can create personal apps without any special permission.
+- **Vault apps** (`vault_id IS NOT NULL`) — visible to all members of the linked vault. The creator assigns it to a vault they're a member of; all vault members then see it.
+
+A `canEdit` boolean is computed server-side per app and returned in `GET /apps`:
+- Admin → can edit any app.
+- Personal app → only the creator can edit it.
+- Vault app → requires `access = 'manage'` in `vault_members`.
+
+The Apps page (`/apps`) is accessible to **all authenticated users** regardless of permissions; each user sees only their own personal apps plus apps belonging to vaults they're a member of.
+
 **Connections.** Directed edges: "app A on server X talks to app B on server Y"
 with a label (protocol/purpose, e.g. `JDBC`, `HTTPS`, `reads from`). These drive
 the topology graph (§11) and the blast-radius view (§5).
@@ -313,6 +325,14 @@ in self mode, or a per-user key unlocked at step-up), so even an admin with DB +
 KEK access cannot read another user's personal vault. Trade-off: personal entries
 are **not** admin-recoverable (acceptable — they're personal). Team vaults keep
 the admin-recoverable KEK envelope scheme (§6.2).
+
+**Linking personal entries to personal apps.** A personal vault entry can optionally be
+linked to one of the user's personal apps via `app_id`. When a user expands a personal
+app on the Apps page they see all personal vault entries linked to it, with the same
+10-second reveal flow (inline vault-password prompt → countdown → clipboard copy with
+auto-clear). The app picker appears in both the "add entry" and "edit entry" forms on
+the Personal vault page. Only the entry's owner can link or unlink it; the target app
+must be a personal app owned by the same user (`vault_id IS NULL AND owner_id = userId`).
 
 ### 4.8 API & API keys (external use)
 
@@ -552,7 +572,11 @@ server_notes(id, server_id, body, author_id, created_at, updated_at)
    -- the Notes tab: dated, authored, markdown entries (newest-first), one row each
 tags(id, name, color)
 server_tags(server_id, tag_id)
-apps(id, name, category, vendor, version, eol_date?, logo_url, docs_url, notes)
+apps(id, name, category, vendor, version, eol_date?, logo_url, docs_url, notes,
+     vault_id?, owner_id?, created_at, updated_at, deleted_at)
+   -- vault_id NULL + owner_id set  → personal app, visible only to its owner
+   -- vault_id NOT NULL             → vault/team app, visible to all vault members
+   -- vault_id NULL + owner_id NULL → legacy/orphaned (admin-only fallback)
 app_instances(id, server_id, app_id, version?, notes)   -- "app A running on server X" (CEO review F1.3)
    -- first-class addressable node for topology + connections
 ports(id, server_id, app_instance_id?, number, protocol, app_label, exposure,
@@ -573,18 +597,30 @@ fs_nodes(id, snapshot_id, path, type, size, mtime, linked_type?, linked_id?)
 
 -- vault
 vaults(id, name, type, owner_id?, key_id?, created_at)   -- type: team|personal
-   -- team vaults: KEK envelope (admin-recoverable). personal vaults: per-user key
-   --   derived/unlocked at step-up so admins genuinely cannot read them (F3.2)
+   -- team vaults: KEK envelope (admin-recoverable). Only admins create vaults.
+   -- GET /vaults returns my_access per vault ('manage'|'reveal'|'view') so the
+   --   frontend knows the calling user's permission level for that vault
 vault_members(vault_id, user_id, access)                 -- view|reveal|manage
 secrets(id, vault_id, type, title, username, host_url, logo_url?, notes,
         ciphertext, iv, auth_tag, wrapped_dek, key_version,
         rotation_period_days?, expires_at?, last_changed_at,
         server_id?, app_id?, script_id?, created_by, created_at,
         updated_at, deleted_at)
-        -- personal-vault entries use host_url + logo_url for the launcher view
+        -- app_id links a team-vault secret to an app; shown in the app's credential section
 secret_history(id, secret_id, ciphertext, iv, auth_tag, wrapped_dek,
                key_version, changed_at, changed_by, reason)
 secret_tags(secret_id, tag_id)
+
+-- personal vault (separate per-user encrypted store, not using the KEK envelope)
+-- (stored in users table + personal_entries, NOT in vaults/secrets)
+-- users: personal_vault_key_salt BYTEA, personal_vault_key_cipher BYTEA
+personal_entries(id, owner_id, title, url?, username?, logo_url?, notes?,
+                 app_id?,            -- links entry to a personal app (vault_id IS NULL)
+                 ciphertext, iv, auth_tag,
+                 notes_cipher?, notes_iv?, notes_auth_tag?,
+                 created_at, updated_at, deleted_at)
+   -- app_id REFERENCES apps(id) ON DELETE SET NULL
+   -- encrypted with per-user PVK (AES-256-GCM); admin cannot read
 
 -- documents
 documents(id, filename, mime, size, checksum, storage_path,
@@ -633,6 +669,12 @@ GET/POST/PATCH/DELETE  /api/servers[/:id]
 GET    /api/servers/:id/topology      -- nodes + edges for the graph
 GET/POST  /api/servers/:id/ports
 GET/POST/PATCH/DELETE  /api/apps[/:id]
+  -- GET /apps: requireAuth only (no permission gate); returns only apps
+  --   the caller owns (personal) or is a vault member of (vault apps).
+  --   Each app row includes: vaultId, vaultName, ownerId, canEdit (bool).
+GET    /api/apps/:id/instances        -- app_instances for this app
+GET    /api/apps/:id/secrets          -- team-vault credentials linked to this app
+  --   requires secrets.view; filters by vault membership
 GET/POST/PATCH/DELETE  /api/connections[/:id]
 GET/POST  /api/tags
 
@@ -646,11 +688,30 @@ GET    /api/servers/:id/fs/snapshots[/:sid]
 
 # vault
 GET/POST/PATCH/DELETE  /api/vaults[/:id]
-POST   /api/vaults/:id/members
+  -- GET /vaults: returns my_access ('manage'|'reveal'|'view') per vault;
+  --   admins always get 'manage'. Only admins can POST (create vaults).
+GET    /api/vault/users?q=            -- user search for vault member management
+                                      -- requires vault.manage_access; LIMIT 50
+POST/DELETE  /api/vaults/:id/members  -- add/remove members + set access level
 GET/POST/PATCH/DELETE  /api/secrets[/:id]          -- never returns value
 POST   /api/secrets/:id/reveal                     -- requires reveal grant; audited
 GET    /api/secrets/:id/history
-GET    /api/me/personal-vault/...
+GET    /api/vaults/:id/secrets        -- secrets for a vault (includes server_hostname,
+                                      --   app_name via LEFT JOINs)
+
+# personal vault (per-user AES-256-GCM key, separate from KEK envelope)
+GET    /api/personal-vault/status
+POST   /api/personal-vault/initialize
+GET    /api/personal-vault/entries[?appId=]   -- optional appId filter for Apps page
+POST   /api/personal-vault/entries
+  --   accepts: title, url, username, value, password (vault pw), appId?
+  --   appId must be a personal app owned by the caller (vault_id IS NULL)
+GET    /api/personal-vault/entries/:id
+PATCH  /api/personal-vault/entries/:id
+  --   accepts: title, url, username, appId (or null to unlink)
+  --   newValue + password required only if rotating the secret value
+DELETE /api/personal-vault/entries/:id
+POST   /api/personal-vault/entries/:id/reveal
 
 # documents
 POST   /api/documents (multipart)
@@ -673,12 +734,13 @@ logic. Repositories wrap raw SQL behind named functions.
 ## 10. Frontend design system
 
 Per the brief: **modern, smooth, professional. Dark by default, light available,
-purple accent, small controls, readable but not chunky.** **Tailwind CSS** (utility
-layer, with the tokens below wired as CSS variables) + **shadcn/ui** components
-(copied into `frontend/src/components/ui/`, themable), `class-variance-authority`
-for variants, `next-themes`-style toggle. **Icons: `lucide-react`** (shadcn/ui's
-default set) — consistent stroke weight, tree-shakeable, sized to the control scale
-(14–16px in compact rows). Use lucide for all icons; no emoji, no mixed icon sets.
+purple accent, small controls, readable but not chunky.**
+
+**As-built stack** (differs from original Tailwind + shadcn plan):
+- **Plain inline CSS** with CSS custom properties (no Tailwind, no shadcn/ui, no class-variance-authority). All design tokens are CSS variables set in `ThemeProvider` via a `<style>` tag; dark/light toggle swaps the token set.
+- **Custom component library** in `frontend/src/components/ui/` — `Button`, `Input`, `Card` — written as thin wrappers around HTML elements with inline styles referencing the token variables.
+- **Icons:** inline SVG paths where needed (no lucide-react or other icon library). Emojis avoided; SVG used for action icons.
+- **SPA routing:** custom `if/else` path-matching in `App.tsx` — no react-router. `window.history.pushState` for navigation; `popstate` listener for back/forward.
 
 **Tokens (dark root):**
 
@@ -767,37 +829,53 @@ TypeScript is added incrementally on the frontend (`npm i -D typescript
 bi-ro/
   backend/
     src/
-      server.js                 bootstraps express, wires routes, starts workers
-      config.js                 reads env, exports frozen config (incl. AUTH_MODE, KEK presence)
-      db/ pool.js  migrate.js
-      middleware/ apiKey.js  session.js  rbac.js  stepUp.js  errorHandler.js  requestId.js
-      routes/ health  auth  servers  apps  ports  connections  scripts  fs
-              vault  secrets  documents  notifications  admin/(users,roles,settings,apiClients,audit)
-      controllers/              thin: validate -> service -> respond
-      services/                 servers, scripts, fs, vault(crypto), notification, email,
-                                expiry.worker, audit, setup
-      integrations/             auth/(self.js, keycloak.js, ldap.js)  smtp.js  kms.js(stub)
-      repositories/             raw SQL behind named functions, one per aggregate
-      crypto/                   envelope.js (KEK/DEK), hash.js, apiKey.js
-      util/                     ulid, jwt, mustache, eventPattern, logger, fsScript(generator)
+      server.ts                 bootstraps express, wires routes, starts workers
+      db/ pool.ts  migrate.ts
+      middleware/ session.ts  rbac.ts  errorHandler.ts
+      routes/ health.ts  auth.ts  servers.ts  apps.ts  vault.ts  personalVault.ts
+              topology.ts  scripts.ts  documents.ts  notifications.ts  recycle.ts
+              audit.ts  backup.ts  settings.ts  admin/(users.ts, setup.ts)
+      crypto/                   envelope.ts (KEK/DEK), personalVault.ts
     migrations/
+      0001_init.sql … 0017_personal_entries_app.sql   (append-only, auto-applied on boot)
     .env.example
     package.json
   frontend/
     src/
-      main.jsx App.jsx
-      styles/ globals.css        tailwind + tokens
-      lib/ api.ts  theme.ts  auth.ts
-      components/ ui/  AppShell  ThemeToggle  DataTable  JsonViewer  CodeEditor
-                  StatusBadge  TopologyCanvas  FolderTree  RevealDialog  UserChip
-      pages/ Dashboard  Servers/  Apps/  Topology  Scripts/  Vault/  Secrets/
-             Personal  Documents/  Notifications/  Audit  Settings  Setup
-      routes.tsx                 react-router v6
-    tailwind.config.js  postcss.config.js  vite.config.js  index.html  package.json
-  Dockerfile                     multi-stage: build frontend, install backend, copy
+      main.tsx
+      App.tsx                   SPA routing (if/else path matching, no react-router)
+      lib/ api.ts               fetch wrapper with typed responses
+      components/
+        ui/ Button.tsx  Input.tsx  Card.tsx
+        AppShell.tsx             sidebar (220px) + topbar + nav permission filter
+        ThemeProvider.tsx        CSS token injection; dark/light toggle
+        ThemeToggle.tsx
+        RevealDialog.tsx         10-second reveal modal for team-vault secrets
+        ConfirmDialog.tsx        generic confirmation modal
+        CommandPalette.tsx       Ctrl/Cmd-K global search
+        DataTable.tsx            generic sortable table component
+      pages/
+        DashboardPage.tsx
+        ServersPage.tsx  ServerDetailPage.tsx
+        AppsPage.tsx             personal + vault apps; inline personal-vault reveal
+        TopologyPage.tsx
+        ScriptsPage.tsx
+        VaultListPage.tsx  VaultDetailPage.tsx  SecretDetailPage.tsx
+        PersonalPage.tsx         per-user AES-256-GCM vault; app-linking picker
+        DocumentsPage.tsx
+        NotificationsPage.tsx
+        AuditPage.tsx
+        BackupPage.tsx
+        RecycleBinPage.tsx
+        SettingsPage.tsx
+        SetupPage.tsx            first-launch wizard
+        LoginPage.tsx            logo + "BI Root" + "Sign in" centered form
+    vite.config.ts  index.html  package.json
+  design-docs/ DESIGN.md  PROGRESS.md
+  Dockerfile                     multi-stage: build frontend, install backend, non-root
   docker-compose.yaml            app + postgres + volumes (NO keycloak)
   keycloak.test.compose.yaml     test-only: throwaway Keycloak + db for OIDC testing
-  .dockerignore  .env.example  README.md  DESIGN.md
+  .dockerignore  .env.example  README.md
 ```
 
 ---
@@ -1591,3 +1669,128 @@ binary once you want visual variants of the dashboard / topology / reveal.
 ---
 
 *End of design. Implementation follows §19 + §20 + §22 + §23 starting at C0.1; do not skip chunks.*
+
+---
+
+## 24. As-built specification — current implementation
+
+This section documents what was actually built. Where it differs from §1–§23, this section is authoritative.
+
+### 24.1 Frontend stack (actual)
+
+| Planned | Actual |
+|---------|--------|
+| Tailwind CSS | Plain inline CSS + CSS custom properties |
+| shadcn/ui component library | Custom minimal components in `frontend/src/components/ui/` (`Button`, `Input`, `Card`) |
+| class-variance-authority | Not used |
+| lucide-react icons | Inline SVG paths; no icon library |
+| react-router v6 | Custom `if/else` path matching in `App.tsx`; `window.history.pushState` + `popstate` |
+| `main.jsx` / `App.jsx` | `main.tsx` / `App.tsx` (TypeScript throughout) |
+
+CSS tokens are injected by `ThemeProvider` as a `<style>` block into `<head>`. Dark/light toggle swaps the full token set. Token names and values follow §10 exactly.
+
+### 24.2 Backend stack (actual)
+
+- **TypeScript throughout** (per eng review E6). Entry point: `backend/src/server.ts`.
+- **Session auth only** (httpOnly cookie, SameSite=Strict). No Bearer-JWT for human users (per eng review E1).
+- **Auto-migrate on boot** via custom `runMigrations()` in `backend/src/db/migrate.ts`. Migrations are in `backend/migrations/` numbered `0001` → `0017` (append-only).
+- **Raw parameterized `pg` queries** throughout (no ORM). Follows F5.1 parameterized-SQL requirement.
+- **First admin** seeded from env (`BIRO_ADMIN_EMAIL` + `BIRO_ADMIN_PASSWORD`) on first boot; force-change on first login (per eng review E3).
+
+### 24.3 Login page
+
+The login form card shows (top to bottom, all centered):
+1. App logo (`/favicon.svg`, 52×52px)
+2. App title in muted small text (`--text-muted`, 13px)
+3. "Sign in" heading (`--text`, 16px, semibold)
+4. Email + password fields and submit button
+
+### 24.4 Apps — ownership model (implemented)
+
+**Migrations:** `0015_apps_vault.sql` (adds `vault_id`) and `0016_apps_owner.sql` (adds `owner_id`).
+
+**Visibility rules (enforced in `GET /apps` SQL):**
+```sql
+WHERE a.deleted_at IS NULL AND (
+  $1 -- isAdmin: sees all
+  OR (a.vault_id IS NULL AND a.owner_id = $2)                      -- personal app
+  OR (a.vault_id IS NOT NULL AND EXISTS (                           -- vault app
+    SELECT 1 FROM vault_members vm
+    WHERE vm.vault_id = a.vault_id AND vm.user_id = $2))
+)
+```
+
+**`canEdit` computed per row:**
+```sql
+($1 OR                                                              -- admin
+ (a.vault_id IS NULL AND a.owner_id = $2) OR                       -- personal owner
+ (a.vault_id IS NOT NULL AND EXISTS (                              -- vault manager
+   SELECT 1 FROM vault_members vm
+   WHERE vm.vault_id = a.vault_id AND vm.user_id = $2
+   AND vm.access = 'manage')))  AS can_edit
+```
+
+**Nav + route:** The `/apps` route has no permission guard — accessible to all authenticated users. The sidebar "Apps" item has no `permission` field.
+
+**Creating apps:** Any authenticated user can call `POST /apps` (no `servers.write` required). `owner_id` is always set to the caller. Assigning `vaultId` requires the caller to be any vault member.
+
+**Editing apps:** `PATCH /apps/:id` checks vault membership and ownership before allowing edits. Reassigning to a different vault requires membership in the target vault too (IDOR fix).
+
+### 24.5 Team vault credentials in Apps page
+
+`GET /apps/:id/secrets` requires `secrets.view`. Returns team-vault secrets where:
+- `s.app_id = <appId>`
+- The caller is a member of `s.vault_id`
+- `s.deleted_at IS NULL`
+
+`days_remaining` is computed with the same `CASE WHEN` expression used in `vault.ts` (not a column).
+
+In the Apps page expanded row, vault apps show team credentials with a `RevealDialog` (10-second modal, audited). Personal apps show their personal vault entries (§24.6) instead.
+
+### 24.6 Personal vault entries linked to personal apps (implemented)
+
+**Migration:** `0017_personal_entries_app.sql` adds `app_id UUID REFERENCES apps(id) ON DELETE SET NULL` to `personal_entries`.
+
+**Backend changes:**
+- `GET /personal-vault/entries` — accepts optional `?appId=` query param; returns `appId` in each entry.
+- `POST /personal-vault/entries` — accepts `appId`; validates the app exists and is a personal app owned by the caller (`vault_id IS NULL AND owner_id = userId`).
+- `PATCH /personal-vault/entries/:id` — accepts `appId` (or `null` to unlink); same validation.
+
+**Personal vault page:** When the user has personal apps, both the "add entry" and "edit entry" forms show a "Link to personal app" dropdown populated from `GET /apps` (filtered to `vaultId === null`).
+
+**Apps page — personal apps:** When a personal app row is expanded, the Credentials section fetches `GET /personal-vault/entries?appId=<id>`. Each entry shows title + username, with an inline reveal flow:
+- Click "Reveal" → inline password input appears.
+- User enters vault password → `POST /personal-vault/entries/:id/reveal`.
+- Value shown for 10 seconds with countdown badge + clipboard copy button (auto-clears clipboard on expiry).
+- All state (countdown, copy feedback, password prompt) is managed in `AppsPage.tsx` independently per entry.
+
+### 24.7 Vault management UI (implemented)
+
+**`VaultDetailPage.tsx`** includes:
+- **Credential create form:** radio toggle to pick "Server" or "App" as the link type (not two independent dropdowns). A single dropdown shows servers or personal apps depending on the selection.
+- **Credential edit modal:** same radio toggle.
+- **Add vault member:** debounced user search field calling `GET /vault/users?q=` + access level picker (`view` / `reveal` / `manage`) + Add button.
+- **Remove member:** `ConfirmDialog` before removal.
+- **Delete secret:** `ConfirmDialog` before deletion.
+
+`GET /vault/users?q=` requires `vault.manage_access`; returns up to 50 matching users (by display name or email).
+
+`GET /vaults/:id/secrets` includes LEFT JOINs for `server_hostname` and `app_name` so the vault detail list can show what each credential is linked to.
+
+`PATCH /secrets/:id` supports updating `type`, `appId`, and `serverId` fields in addition to the standard metadata.
+
+### 24.8 Migrations applied (in order)
+
+| # | File | Change |
+|---|------|--------|
+| 0001–0014 | initial + feature migrations | core schema through phase 8 |
+| 0015 | `0015_apps_vault.sql` | `apps.vault_id UUID REFERENCES vaults(id)` |
+| 0016 | `0016_apps_owner.sql` | `apps.owner_id UUID REFERENCES users(id)` |
+| 0017 | `0017_personal_entries_app.sql` | `personal_entries.app_id UUID REFERENCES apps(id)` |
+
+### 24.9 Security notes (as-built)
+
+- **IDOR on `PATCH /apps/:id`** was present in an earlier version (any `servers.write` user could reassign apps to any vault). Fixed: the route now fetches the existing `vault_id` and `owner_id` before deciding whether to allow the edit.
+- **Personal vault reveal endpoint** (`POST /personal-vault/entries/:id/reveal`) is IDOR-safe: WHERE clause includes `owner_id = userId`.
+- **`GET /apps/:id/secrets`** uses `JOIN vault_members vm ON vm.vault_id = s.vault_id AND vm.user_id = $2` — non-members cannot retrieve credentials even by guessing an `appId`.
+- **`days_remaining` was referenced as a column** in an early version of `GET /apps/:id/secrets`, causing PostgreSQL to throw and the frontend to silently show "No credentials linked." Fixed by replacing `s.days_remaining` with the full `CASE WHEN` expression.
