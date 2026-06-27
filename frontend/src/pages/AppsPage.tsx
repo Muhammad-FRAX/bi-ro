@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type CSSProperties, type FormEvent } from 'react'
+import { useState, useEffect, useCallback, useRef, type CSSProperties, type FormEvent } from 'react'
 import { AppShell } from '../components/AppShell.tsx'
 import { RevealDialog } from '../components/RevealDialog.tsx'
 import { api, ApiError } from '../lib/api.ts'
@@ -44,6 +44,14 @@ interface AppSecret {
 }
 
 interface Vault { id: string; name: string }
+
+interface PersonalEntry {
+  id: string
+  title: string
+  url: string | null
+  username: string | null
+  appId: string | null
+}
 
 interface AppsPageProps {
   user: { displayName: string; email: string; permissions: string[] }
@@ -132,6 +140,33 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
 
   const [revealTarget, setRevealTarget] = useState<{ id: string; title: string } | null>(null)
 
+  const [personalEntries, setPersonalEntries] = useState<Record<string, PersonalEntry[]>>({})
+  const [personalEntriesLoading, setPersonalEntriesLoading] = useState<Record<string, boolean>>({})
+  const [personalRevealingId, setPersonalRevealingId] = useState<string | null>(null)
+  const [personalRevealPw, setPersonalRevealPw] = useState('')
+  const [personalRevealError, setPersonalRevealError] = useState<string | null>(null)
+  const [personalRevealSubmitting, setPersonalRevealSubmitting] = useState(false)
+  const [personalRevealed, setPersonalRevealed] = useState<Record<string, { value: string; exp: number }>>({})
+  const [personalCopiedId, setPersonalCopiedId] = useState<string | null>(null)
+  const personalClipRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => () => { if (personalClipRef.current) clearTimeout(personalClipRef.current) }, [])
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      const now = Date.now()
+      setPersonalRevealed((prev) => {
+        if (Object.keys(prev).length === 0) return prev
+        const next = { ...prev }
+        for (const k of Object.keys(next)) {
+          if (next[k]!.exp <= now) delete next[k]
+        }
+        return next
+      })
+    }, 500)
+    return () => clearInterval(id)
+  }, [])
+
   const canViewSecrets = user.permissions.includes('secrets.view')
 
   const fetchApps = useCallback(async () => {
@@ -181,13 +216,60 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
     }
   }
 
-  function toggleExpand(appId: string) {
+  async function loadPersonalEntries(appId: string) {
+    if (personalEntries[appId]) return
+    setPersonalEntriesLoading((p) => ({ ...p, [appId]: true }))
+    try {
+      const data = await api.get<{ entries: PersonalEntry[] }>(`/personal-vault/entries?appId=${encodeURIComponent(appId)}`)
+      setPersonalEntries((p) => ({ ...p, [appId]: data.entries }))
+    } catch {
+      setPersonalEntries((p) => ({ ...p, [appId]: [] }))
+    } finally {
+      setPersonalEntriesLoading((p) => ({ ...p, [appId]: false }))
+    }
+  }
+
+  async function handlePersonalReveal(entryId: string) {
+    if (!personalRevealPw) { setPersonalRevealError('Password required'); return }
+    setPersonalRevealError(null)
+    setPersonalRevealSubmitting(true)
+    try {
+      const data = await api.post<{ value: string }>(`/personal-vault/entries/${entryId}/reveal`, { password: personalRevealPw })
+      setPersonalRevealed((prev) => ({ ...prev, [entryId]: { value: data.value, exp: Date.now() + 10_000 } }))
+      setPersonalRevealingId(null)
+      setPersonalRevealPw('')
+    } catch (err) {
+      setPersonalRevealError(err instanceof ApiError ? err.message : 'Reveal failed')
+    } finally {
+      setPersonalRevealSubmitting(false)
+    }
+  }
+
+  async function handlePersonalCopy(entryId: string) {
+    const rev = personalRevealed[entryId]
+    if (!rev || rev.exp <= Date.now()) return
+    try {
+      await navigator.clipboard.writeText(rev.value)
+      setPersonalCopiedId(entryId)
+      setTimeout(() => setPersonalCopiedId((p) => p === entryId ? null : p), 1500)
+      if (personalClipRef.current) clearTimeout(personalClipRef.current)
+      personalClipRef.current = setTimeout(() => {
+        navigator.clipboard.writeText('').catch(() => {})
+      }, Math.max(0, rev.exp - Date.now()))
+    } catch { /* clipboard unavailable */ }
+  }
+
+  function toggleExpand(appId: string, isPersonal: boolean) {
     if (expandedId === appId) {
       setExpandedId(null)
     } else {
       setExpandedId(appId)
       void loadInstances(appId)
-      if (canViewSecrets) void loadSecrets(appId)
+      if (isPersonal) {
+        void loadPersonalEntries(appId)
+      } else if (canViewSecrets) {
+        void loadSecrets(appId)
+      }
     }
   }
 
@@ -362,7 +444,7 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
                     <tr
                       key={app.id}
                       style={{ height: 38, borderBottom: expandedId === app.id || editingId === app.id ? 'none' : '1px solid var(--border)', background: expandedId === app.id ? 'color-mix(in srgb, var(--accent) 4%, transparent)' : 'transparent', cursor: 'pointer' }}
-                      onClick={() => { if (editingId !== app.id) toggleExpand(app.id) }}
+                      onClick={() => { if (editingId !== app.id) toggleExpand(app.id, app.vaultId === null) }}
                     >
                       <td style={TD}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -464,7 +546,82 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
                             )}
 
                             {/* Credentials section */}
-                            {canViewSecrets && (
+                            {app.vaultId === null ? (
+                              /* Personal app — show personal vault entries */
+                              <div>
+                                <div style={{ fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600, marginBottom: 8 }}>Credentials</div>
+                                {personalEntriesLoading[app.id] ? (
+                                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Loading…</div>
+                                ) : !personalEntries[app.id] || personalEntries[app.id]!.length === 0 ? (
+                                  <div style={{ fontSize: 12, color: 'var(--text-subtle)', fontStyle: 'italic' }}>No credentials linked to this app. Link entries from your Personal vault.</div>
+                                ) : (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                    {personalEntries[app.id]!.map((entry) => {
+                                      const rev = personalRevealed[entry.id]
+                                      const isRevealing = personalRevealingId === entry.id
+                                      const secsLeft = rev ? Math.ceil((rev.exp - Date.now()) / 1000) : 0
+                                      const countdownColor = secsLeft <= 3 ? 'var(--danger)' : secsLeft <= 6 ? 'var(--warning)' : 'var(--success)'
+                                      return (
+                                        <div key={entry.id} style={{ display: 'flex', flexDirection: 'column', gap: 0, background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
+                                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px' }}>
+                                            <span style={{ fontSize: 16, lineHeight: 1 }}>🔑</span>
+                                            <span style={{ fontWeight: 500, fontSize: 13, color: 'var(--text)', flex: 1 }}>{entry.title}</span>
+                                            {entry.username && (
+                                              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-muted)' }}>{entry.username}</span>
+                                            )}
+                                            {rev ? (
+                                              <>
+                                                <span style={{ fontSize: 11, fontWeight: 700, fontFamily: 'var(--font-mono)', color: countdownColor, background: `color-mix(in srgb, ${countdownColor} 12%, transparent)`, border: `1px solid color-mix(in srgb, ${countdownColor} 30%, transparent)`, borderRadius: 'var(--radius-sm)', padding: '2px 6px', minWidth: 28, textAlign: 'center' }}>
+                                                  {secsLeft}s
+                                                </span>
+                                                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, background: 'var(--bg-elev-2)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '4px 8px', color: 'var(--success)', userSelect: 'all' }}>
+                                                  {rev.value}
+                                                </span>
+                                                <button
+                                                  onClick={() => void handlePersonalCopy(entry.id)}
+                                                  title={personalCopiedId === entry.id ? 'Copied!' : 'Copy'}
+                                                  style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, padding: 0, background: personalCopiedId === entry.id ? 'color-mix(in srgb, var(--success) 15%, transparent)' : 'var(--bg-elev-2)', border: `1px solid ${personalCopiedId === entry.id ? 'color-mix(in srgb, var(--success) 40%, transparent)' : 'var(--border)'}`, borderRadius: 'var(--radius-sm)', color: personalCopiedId === entry.id ? 'var(--success)' : 'var(--text-muted)', cursor: 'pointer' }}
+                                                >
+                                                  {personalCopiedId === entry.id
+                                                    ? <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>
+                                                    : <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/><path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5h-.5A1.5 1.5 0 0 0 3 3v.5h10V3a1.5 1.5 0 0 0-1.5-1.5H11A1.5 1.5 0 0 0 9.5 0h-3z"/></svg>
+                                                  }
+                                                </button>
+                                              </>
+                                            ) : (
+                                              <button
+                                                onClick={() => { setPersonalRevealingId(isRevealing ? null : entry.id); setPersonalRevealPw(''); setPersonalRevealError(null) }}
+                                                style={{ height: 24, padding: '0 10px', background: 'var(--accent-soft)', border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)', color: 'var(--accent)', fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
+                                              >
+                                                {isRevealing ? 'Cancel' : 'Reveal'}
+                                              </button>
+                                            )}
+                                          </div>
+                                          {isRevealing && !rev && (
+                                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '8px 10px', borderTop: '1px solid var(--border)' }}>
+                                              <input
+                                                type="password"
+                                                value={personalRevealPw}
+                                                onChange={(e) => setPersonalRevealPw(e.target.value)}
+                                                onKeyDown={(e) => { if (e.key === 'Enter') void handlePersonalReveal(entry.id) }}
+                                                placeholder="Vault password"
+                                                autoFocus
+                                                style={{ ...GHOST_BTN, height: 28, flex: 1, background: 'var(--bg-elev-2)', border: '1px solid var(--border)', color: 'var(--text)', fontFamily: 'inherit', padding: '0 8px' }}
+                                              />
+                                              <button onClick={() => void handlePersonalReveal(entry.id)} disabled={personalRevealSubmitting} style={{ ...PRIMARY_BTN, opacity: personalRevealSubmitting ? 0.6 : 1, whiteSpace: 'nowrap' }}>
+                                                {personalRevealSubmitting ? '…' : 'Show'}
+                                              </button>
+                                              {personalRevealError && <span style={{ fontSize: 12, color: 'var(--danger)', whiteSpace: 'nowrap' }}>{personalRevealError}</span>}
+                                            </div>
+                                          )}
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            ) : canViewSecrets ? (
+                              /* Vault app — show team vault secrets */
                               <div>
                                 <div style={{ fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600, marginBottom: 8 }}>Credentials</div>
                                 {secretsLoading[app.id] ? (
@@ -492,7 +649,7 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
                                   </div>
                                 )}
                               </div>
-                            )}
+                            ) : null}
 
                             {/* Running on servers */}
                             <div>

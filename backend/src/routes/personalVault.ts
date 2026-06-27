@@ -96,24 +96,30 @@ export function personalVaultRouter(pool: Pool): Router {
   })
 
   // ── GET /api/personal-vault/entries ─────────────────────────────────────────
-  // Returns metadata only — no crypto fields
+  // Returns metadata only — no crypto fields. Optional ?appId= filter.
   router.get('/personal-vault/entries', async (req, res, next) => {
     try {
       const userId = req.session.userId!
+      const { appId } = req.query as { appId?: string }
+
+      const qParams: unknown[] = [userId]
+      const appFilter = appId ? ` AND app_id = $${qParams.push(appId)}` : ''
+
       const { rows } = await pool.query<{
         id: string
         title: string
         url: string | null
         username: string | null
         logo_url: string | null
+        app_id: string | null
         created_at: string
         updated_at: string
       }>(
-        `SELECT id, title, url, username, logo_url, created_at, updated_at
+        `SELECT id, title, url, username, logo_url, app_id, created_at, updated_at
          FROM personal_entries
-         WHERE owner_id = $1 AND deleted_at IS NULL
+         WHERE owner_id = $1 AND deleted_at IS NULL${appFilter}
          ORDER BY title`,
-        [userId],
+        qParams,
       )
       res.json({
         entries: rows.map((r) => ({
@@ -122,6 +128,7 @@ export function personalVaultRouter(pool: Pool): Router {
           url: r.url,
           username: r.username,
           logoUrl: r.logo_url,
+          appId: r.app_id,
           createdAt: r.created_at,
           updatedAt: r.updated_at,
         })),
@@ -135,13 +142,14 @@ export function personalVaultRouter(pool: Pool): Router {
   router.post('/personal-vault/entries', async (req, res, next) => {
     try {
       const userId = req.session.userId!
-      const { title, url, username, value, logo_url, password } = req.body as {
+      const { title, url, username, value, logo_url, password, appId } = req.body as {
         title?: unknown
         url?: unknown
         username?: unknown
         value?: unknown
         logo_url?: unknown
         password?: unknown
+        appId?: unknown
       }
 
       if (typeof title !== 'string' || !title.trim()) {
@@ -155,6 +163,20 @@ export function personalVaultRouter(pool: Pool): Router {
       if (typeof password !== 'string' || !password) {
         res.status(400).json({ error: 'password is required to encrypt the entry' })
         return
+      }
+
+      // Validate appId — must be a personal app owned by this user
+      let resolvedAppId: string | null = null
+      if (typeof appId === 'string' && appId.trim()) {
+        const { rows: appRows } = await pool.query<{ id: string }>(
+          `SELECT id FROM apps WHERE id = $1 AND owner_id = $2 AND vault_id IS NULL AND deleted_at IS NULL`,
+          [appId.trim(), userId],
+        )
+        if (!appRows[0]) {
+          res.status(400).json({ error: 'App not found or not a personal app you own' })
+          return
+        }
+        resolvedAppId = appRows[0].id
       }
 
       // Load user's vault key material
@@ -190,18 +212,20 @@ export function personalVaultRouter(pool: Pool): Router {
         url: string | null
         username: string | null
         logo_url: string | null
+        app_id: string | null
         created_at: string
         updated_at: string
       }>(
-        `INSERT INTO personal_entries (owner_id, title, url, username, logo_url, ciphertext, iv, auth_tag)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING id, title, url, username, logo_url, created_at, updated_at`,
+        `INSERT INTO personal_entries (owner_id, title, url, username, logo_url, app_id, ciphertext, iv, auth_tag)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING id, title, url, username, logo_url, app_id, created_at, updated_at`,
         [
           userId,
           title.trim(),
           typeof url === 'string' && url.trim() ? url.trim() : null,
           typeof username === 'string' && username.trim() ? username.trim() : null,
           typeof logo_url === 'string' && logo_url.trim() ? logo_url.trim() : null,
+          resolvedAppId,
           ciphertext,
           iv,
           authTag,
@@ -216,6 +240,7 @@ export function personalVaultRouter(pool: Pool): Router {
           url: entry.url,
           username: entry.username,
           logoUrl: entry.logo_url,
+          appId: entry.app_id,
           createdAt: entry.created_at,
           updatedAt: entry.updated_at,
         },
@@ -272,13 +297,14 @@ export function personalVaultRouter(pool: Pool): Router {
     try {
       const userId = req.session.userId!
       const { id } = req.params
-      const { title, url, username, logo_url, newValue, password } = req.body as {
+      const { title, url, username, logo_url, newValue, password, appId } = req.body as {
         title?: unknown
         url?: unknown
         username?: unknown
         logo_url?: unknown
         newValue?: unknown
         password?: unknown
+        appId?: unknown
       }
 
       const updates: string[] = ['updated_at = NOW()']
@@ -300,6 +326,23 @@ export function personalVaultRouter(pool: Pool): Router {
       if (logo_url !== undefined) {
         updates.push(`logo_url = $${idx++}`)
         params.push(typeof logo_url === 'string' && logo_url.trim() ? logo_url.trim() : null)
+      }
+      if (appId !== undefined) {
+        if (appId === null || appId === '') {
+          updates.push(`app_id = $${idx++}`)
+          params.push(null)
+        } else if (typeof appId === 'string') {
+          const { rows: appRows } = await pool.query<{ id: string }>(
+            `SELECT id FROM apps WHERE id = $1 AND owner_id = $2 AND vault_id IS NULL AND deleted_at IS NULL`,
+            [appId, userId],
+          )
+          if (!appRows[0]) {
+            res.status(400).json({ error: 'App not found or not a personal app you own' })
+            return
+          }
+          updates.push(`app_id = $${idx++}`)
+          params.push(appId)
+        }
       }
 
       // Value rotation — requires vault password

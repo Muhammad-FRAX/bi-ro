@@ -9,9 +9,12 @@ interface Entry {
   url: string | null
   username: string | null
   logoUrl: string | null
+  appId: string | null
   createdAt: string
   updatedAt: string
 }
+
+interface PersonalApp { id: string; name: string }
 
 interface Props {
   user: { displayName: string; email: string; permissions: string[] }
@@ -77,14 +80,18 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
   const [initSubmitting, setInitSubmitting] = useState(false)
   const [initError, setInitError] = useState<string | null>(null)
 
+  // Personal apps (for linking entries)
+  const [personalApps, setPersonalApps] = useState<PersonalApp[]>([])
+
   // Add entry form
   const [showAdd, setShowAdd] = useState(false)
   const [addSubmitting, setAddSubmitting] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
+  const [addAppId, setAddAppId] = useState('')
 
   // Edit entry form
   const [editingId, setEditingId] = useState<string | null>(null)
-  const [editDraft, setEditDraft] = useState({ title: '', url: '', username: '', newPassword: '', vaultPassword: '' })
+  const [editDraft, setEditDraft] = useState({ title: '', url: '', username: '', newPassword: '', vaultPassword: '', appId: '' })
   const [editSubmitting, setEditSubmitting] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
 
@@ -148,6 +155,12 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
 
   useEffect(() => { void checkStatus() }, [])
 
+  useEffect(() => {
+    api.get<{ apps: { id: string; name: string; vaultId: string | null }[] }>('/apps')
+      .then((d) => setPersonalApps(d.apps.filter((a) => a.vaultId === null)))
+      .catch(() => {})
+  }, [])
+
   async function handleInit(e: FormEvent) {
     e.preventDefault()
     setInitError(null)
@@ -178,8 +191,10 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
         username: (fd.get('username') as string).trim() || undefined,
         value: fd.get('value') as string,
         password: fd.get('password') as string,
+        appId: addAppId || undefined,
       })
       setShowAdd(false)
+      setAddAppId('')
       e.currentTarget.reset()
       await loadEntries()
     } catch (err) {
@@ -191,7 +206,7 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
 
   function openEdit(entry: Entry) {
     setEditingId(entry.id)
-    setEditDraft({ title: entry.title, url: entry.url ?? '', username: entry.username ?? '', newPassword: '', vaultPassword: '' })
+    setEditDraft({ title: entry.title, url: entry.url ?? '', username: entry.username ?? '', newPassword: '', vaultPassword: '', appId: entry.appId ?? '' })
     setEditError(null)
   }
 
@@ -208,6 +223,7 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
         title: editDraft.title.trim(),
         url: editDraft.url.trim() || null,
         username: editDraft.username.trim() || null,
+        appId: editDraft.appId || null,
       }
       if (editDraft.newPassword) {
         body.newValue = editDraft.newPassword
@@ -345,6 +361,15 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
                   <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4, gridColumn: '1 / -1' }}>
                     Vault password (to encrypt)<input name="password" type="password" required placeholder="Your vault password" style={INPUT} />
                   </label>
+                  {personalApps.length > 0 && (
+                    <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4, gridColumn: '1 / -1' }}>
+                      Link to personal app (optional)
+                      <select value={addAppId} onChange={(e) => setAddAppId(e.target.value)} style={{ ...INPUT, height: 32 }}>
+                        <option value="">— None —</option>
+                        {personalApps.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                      </select>
+                    </label>
+                  )}
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
                   <button type="button" onClick={() => setShowAdd(false)} style={BTN_GHOST}>Cancel</button>
@@ -510,6 +535,15 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
                             <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4 }}>
                               Vault password (to re-encrypt)
                               <input type="password" value={editDraft.vaultPassword} onChange={(e) => setEditDraft((p) => ({ ...p, vaultPassword: e.target.value }))} placeholder="Your vault password" style={INPUT} autoFocus />
+                            </label>
+                          )}
+                          {personalApps.length > 0 && (
+                            <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4, gridColumn: '1 / -1' }}>
+                              Link to personal app
+                              <select value={editDraft.appId} onChange={(e) => setEditDraft((p) => ({ ...p, appId: e.target.value }))} style={{ ...INPUT, height: 32 }}>
+                                <option value="">— None —</option>
+                                {personalApps.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                              </select>
                             </label>
                           )}
                         </div>
