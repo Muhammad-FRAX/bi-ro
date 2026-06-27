@@ -5,7 +5,7 @@ import { api } from '../lib/api.ts'
 const NAV_ITEMS: { label: string; href: string; permission?: string | string[] }[] = [
   { label: 'Dashboard',     href: '/' },
   { label: 'Servers',       href: '/servers',       permission: 'infra.read' },
-  { label: 'Apps',          href: '/apps',           permission: 'infra.read' },
+  { label: 'Apps',          href: '/apps',           permission: ['infra.read', 'secrets.view'] },
   { label: 'Topology',      href: '/topology',       permission: 'infra.read' },
   { label: 'Scripts',       href: '/scripts',        permission: 'infra.read' },
   { label: 'Vault',         href: '/vault',          permission: 'secrets.view' },

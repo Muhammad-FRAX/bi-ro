@@ -216,7 +216,7 @@ export default function App() {
   }
 
   if (currentPath === '/apps') {
-    if (!has('infra.read')) { navigate('/'); return null }
+    if (!has('infra.read', 'secrets.view')) { navigate('/'); return null }
     return (
       <ThemeProvider>
         {palette}

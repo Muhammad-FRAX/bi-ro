@@ -81,6 +81,7 @@ export function VaultDetailPage({ vaultId, user, appTitle, onNavigate, onLogout 
   // Edit credential
   const [editingSecret, setEditingSecret] = useState<Secret | null>(null)
   const [editDraft, setEditDraft] = useState({ title: '', type: 'generic', username: '', hostUrl: '', notes: '', rotationPeriodDays: '', serverId: '', appId: '' })
+  const [editCredLinkType, setEditCredLinkType] = useState<'server' | 'app'>('server')
   const [editSubmitting, setEditSubmitting] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
 
@@ -90,6 +91,7 @@ export function VaultDetailPage({ vaultId, user, appTitle, onNavigate, onLogout 
     title: '', type: 'generic', username: '', value: '',
     hostUrl: '', rotationPeriodDays: '', serverId: '', appId: '',
   })
+  const [newCredLinkType, setNewCredLinkType] = useState<'server' | 'app'>('server')
   const [creating, setCreating] = useState(false)
 
   // Reveal dialog
@@ -166,6 +168,7 @@ export function VaultDetailPage({ vaultId, user, appTitle, onNavigate, onLogout 
         appId: newSecret.appId || undefined,
       })
       setNewSecret({ title: '', type: 'generic', username: '', value: '', hostUrl: '', rotationPeriodDays: '', serverId: '', appId: '' })
+      setNewCredLinkType('server')
       setShowNew(false)
       await load()
     } catch (err) {
@@ -186,6 +189,7 @@ export function VaultDetailPage({ vaultId, user, appTitle, onNavigate, onLogout 
       serverId: s.server_id ?? '',
       appId: s.app_id ?? '',
     })
+    setEditCredLinkType(s.app_id ? 'app' : 'server')
     setEditError(null)
     setEditingSecret(s)
   }
@@ -353,20 +357,35 @@ export function VaultDetailPage({ vaultId, user, appTitle, onNavigate, onLogout 
                 Host / URL
                 <input style={FIELD} value={editDraft.hostUrl} onChange={(e) => setEditDraft((p) => ({ ...p, hostUrl: e.target.value }))} placeholder="e.g. db-01:5432" />
               </label>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                Linked server
-                <select style={FIELD} value={editDraft.serverId} onChange={(e) => setEditDraft((p) => ({ ...p, serverId: e.target.value, appId: e.target.value ? '' : p.appId }))}>
-                  <option value="">— none —</option>
-                  {servers.map((s) => <option key={s.id} value={s.id}>{s.hostname}</option>)}
-                </select>
-              </label>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                Linked app
-                <select style={FIELD} value={editDraft.appId} onChange={(e) => setEditDraft((p) => ({ ...p, appId: e.target.value, serverId: e.target.value ? '' : p.serverId }))}>
-                  <option value="">— none —</option>
-                  {apps.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                </select>
-              </label>
+              <div style={{ gridColumn: '1 / -1', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Belongs to</span>
+                <div style={{ display: 'flex', gap: 0, border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden', width: 'fit-content' }}>
+                  {(['server', 'app'] as const).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => {
+                        setEditCredLinkType(t)
+                        setEditDraft((p) => ({ ...p, serverId: '', appId: '' }))
+                      }}
+                      style={{ padding: '4px 14px', fontSize: 12, fontWeight: editCredLinkType === t ? 600 : 400, background: editCredLinkType === t ? 'var(--accent)' : 'transparent', color: editCredLinkType === t ? '#fff' : 'var(--text-muted)', border: 'none', cursor: 'pointer', fontFamily: 'inherit', transition: 'background 0.12s' }}
+                    >
+                      {t === 'server' ? 'Server' : 'App'}
+                    </button>
+                  ))}
+                </div>
+                {editCredLinkType === 'server' ? (
+                  <select style={FIELD} value={editDraft.serverId} onChange={(e) => setEditDraft((p) => ({ ...p, serverId: e.target.value }))}>
+                    <option value="">— no server —</option>
+                    {servers.map((s) => <option key={s.id} value={s.id}>{s.hostname}</option>)}
+                  </select>
+                ) : (
+                  <select style={FIELD} value={editDraft.appId} onChange={(e) => setEditDraft((p) => ({ ...p, appId: e.target.value }))}>
+                    <option value="">— no app —</option>
+                    {apps.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                )}
+              </div>
               <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                 Rotation period (days)
                 <input type="number" min={1} style={{ ...FIELD, width: '100%' }} value={editDraft.rotationPeriodDays} onChange={(e) => setEditDraft((p) => ({ ...p, rotationPeriodDays: e.target.value }))} placeholder="e.g. 90" />
@@ -474,19 +493,34 @@ export function VaultDetailPage({ vaultId, user, appTitle, onNavigate, onLogout 
                     <label style={{ fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 4 }}>Host / URL</label>
                     <input style={FIELD} value={newSecret.hostUrl} onChange={(e) => setNewSecret((p) => ({ ...p, hostUrl: e.target.value }))} placeholder="e.g. db-01:5432" />
                   </div>
-                  <div>
-                    <label style={{ fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 4 }}>Linked server</label>
-                    <select style={FIELD} value={newSecret.serverId} onChange={(e) => setNewSecret((p) => ({ ...p, serverId: e.target.value, appId: e.target.value ? '' : p.appId }))}>
-                      <option value="">— none —</option>
-                      {servers.map((s) => <option key={s.id} value={s.id}>{s.hostname}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label style={{ fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 4 }}>Linked app</label>
-                    <select style={FIELD} value={newSecret.appId} onChange={(e) => setNewSecret((p) => ({ ...p, appId: e.target.value, serverId: e.target.value ? '' : p.serverId }))}>
-                      <option value="">— none —</option>
-                      {apps.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                    </select>
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    <label style={{ fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 6 }}>Belongs to</label>
+                    <div style={{ display: 'flex', gap: 0, marginBottom: 8, border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', overflow: 'hidden', width: 'fit-content' }}>
+                      {(['server', 'app'] as const).map((t) => (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() => {
+                            setNewCredLinkType(t)
+                            setNewSecret((p) => ({ ...p, serverId: '', appId: '' }))
+                          }}
+                          style={{ padding: '4px 14px', fontSize: 12, fontWeight: newCredLinkType === t ? 600 : 400, background: newCredLinkType === t ? 'var(--accent)' : 'transparent', color: newCredLinkType === t ? '#fff' : 'var(--text-muted)', border: 'none', cursor: 'pointer', fontFamily: 'inherit', transition: 'background 0.12s' }}
+                        >
+                          {t === 'server' ? 'Server' : 'App'}
+                        </button>
+                      ))}
+                    </div>
+                    {newCredLinkType === 'server' ? (
+                      <select style={FIELD} value={newSecret.serverId} onChange={(e) => setNewSecret((p) => ({ ...p, serverId: e.target.value }))}>
+                        <option value="">— no server —</option>
+                        {servers.map((s) => <option key={s.id} value={s.id}>{s.hostname}</option>)}
+                      </select>
+                    ) : (
+                      <select style={FIELD} value={newSecret.appId} onChange={(e) => setNewSecret((p) => ({ ...p, appId: e.target.value }))}>
+                        <option value="">— no app —</option>
+                        {apps.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                      </select>
+                    )}
                   </div>
                 </div>
 

@@ -21,18 +21,34 @@ export function appsRouter(pool: Pool): Router {
 
   // ── Apps catalog ──────────────────────────────────────────────────────────
 
-  router.get('/apps', requireAuth, requirePermission('infra.read'), async (_req, res, next) => {
+  router.get('/apps', requireAuth, async (req, res, next) => {
     try {
+      const userId = req.session.userId!
+      const perms: string[] = req.session.permissions ?? []
+      const isAdmin = perms.includes('users.manage')
+      const hasInfraRead = perms.includes('infra.read')
+
       const { rows } = await pool.query<{
         id: string; name: string; category: string | null; vendor: string | null
         version: string | null; eol_date: string | null; logo_url: string | null
         docs_url: string | null; notes: string | null; created_at: string; updated_at: string
+        vault_id: string | null; vault_name: string | null
       }>(
-        `SELECT id, name, category, vendor, version, eol_date, logo_url, docs_url, notes,
-                created_at, updated_at
-         FROM apps
-         WHERE deleted_at IS NULL
-         ORDER BY name`,
+        `SELECT a.id, a.name, a.category, a.vendor, a.version, a.eol_date, a.logo_url,
+                a.docs_url, a.notes, a.created_at, a.updated_at, a.vault_id, v.name AS vault_name
+         FROM apps a
+         LEFT JOIN vaults v ON v.id = a.vault_id
+         WHERE a.deleted_at IS NULL
+           AND (
+             $1                                           -- admin sees all
+             OR (a.vault_id IS NULL AND $2)               -- catalog apps: need infra.read
+             OR (a.vault_id IS NOT NULL AND EXISTS (      -- vault apps: need membership
+               SELECT 1 FROM vault_members vm
+               WHERE vm.vault_id = a.vault_id AND vm.user_id = $3
+             ))
+           )
+         ORDER BY a.vault_id NULLS FIRST, a.name`,
+        [isAdmin, hasInfraRead, userId],
       )
       res.json({
         apps: rows.map((r) => ({
@@ -40,24 +56,40 @@ export function appsRouter(pool: Pool): Router {
           version: r.version, eolDate: r.eol_date, logoUrl: r.logo_url,
           docsUrl: r.docs_url, notes: r.notes,
           createdAt: r.created_at, updatedAt: r.updated_at,
+          vaultId: r.vault_id, vaultName: r.vault_name,
         })),
       })
     } catch (err) { next(err) }
   })
 
-  router.post('/apps', requireAuth, requirePermission('servers.write'), async (req, res, next) => {
+  router.post('/apps', requireAuth, async (req, res, next) => {
     try {
-      const { name, category, vendor, version, eol_date, logo_url, docs_url, notes } =
+      const { name, category, vendor, version, eol_date, logo_url, docs_url, notes, vaultId } =
         req.body as Record<string, unknown>
 
       if (typeof name !== 'string' || !name.trim()) {
-        res.status(400).json({ error: 'name is required' })
-        return
+        res.status(400).json({ error: 'name is required' }); return
+      }
+
+      const perms: string[] = req.session.permissions ?? []
+      const isAdmin = perms.includes('users.manage')
+      const hasServersWrite = perms.includes('servers.write')
+
+      // Vault app: creator must be a vault manager for that vault
+      if (typeof vaultId === 'string' && vaultId) {
+        const { rows: memberRows } = await pool.query(
+          `SELECT access FROM vault_members WHERE vault_id = $1 AND user_id = $2`,
+          [vaultId, req.session.userId],
+        )
+        const isVaultManager = isAdmin || memberRows[0]?.access === 'manage'
+        if (!isVaultManager) { res.status(403).json({ error: 'Must be a vault manager to create vault apps' }); return }
+      } else if (!hasServersWrite && !isAdmin) {
+        res.status(403).json({ error: 'Insufficient permissions' }); return
       }
 
       const { rows } = await pool.query<{ id: string }>(
-        `INSERT INTO apps (name, category, vendor, version, eol_date, logo_url, docs_url, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO apps (name, category, vendor, version, eol_date, logo_url, docs_url, notes, vault_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id`,
         [
           name.trim(),
@@ -68,6 +100,7 @@ export function appsRouter(pool: Pool): Router {
           typeof logo_url === 'string' ? logo_url.trim() || null : null,
           typeof docs_url === 'string' ? docs_url.trim() || null : null,
           typeof notes === 'string' ? notes.trim() || null : null,
+          typeof vaultId === 'string' ? vaultId || null : null,
         ],
       ).catch((err: { code?: string }) => {
         if (err.code === '23505') throw Object.assign(new Error('DUPLICATE'), { isDuplicate: true })
@@ -77,8 +110,7 @@ export function appsRouter(pool: Pool): Router {
       res.status(201).json({ app: { id: rows[0]!.id, name: name.trim() } })
     } catch (err: unknown) {
       if (err instanceof Error && (err as Error & { isDuplicate?: boolean }).isDuplicate) {
-        res.status(409).json({ error: 'An app with that name already exists' })
-        return
+        res.status(409).json({ error: 'An app with that name already exists' }); return
       }
       next(err)
     }
@@ -109,10 +141,54 @@ export function appsRouter(pool: Pool): Router {
     } catch (err) { next(err) }
   })
 
-  router.patch('/apps/:id', requireAuth, requirePermission('servers.write'), async (req, res, next) => {
+  router.patch('/apps/:id', requireAuth, async (req, res, next) => {
     try {
-      const { name, category, vendor, version, eol_date, logo_url, docs_url, notes } =
+      const userId = req.session.userId!
+      const perms: string[] = req.session.permissions ?? []
+      const isAdmin = perms.includes('users.manage')
+      const hasServersWrite = perms.includes('servers.write')
+
+      // Fetch current app to check its existing vault ownership
+      const { rows: appRows } = await pool.query<{ vault_id: string | null }>(
+        `SELECT vault_id FROM apps WHERE id = $1 AND deleted_at IS NULL`,
+        [req.params['id']],
+      )
+      if (!appRows[0]) { res.status(404).json({ error: 'App not found' }); return }
+      const currentVaultId = appRows[0].vault_id
+
+      // Check the caller has permission to edit THIS app in its current home
+      if (!isAdmin) {
+        if (currentVaultId) {
+          // Vault app: must be a vault manager
+          const { rows: m } = await pool.query(
+            `SELECT 1 FROM vault_members WHERE vault_id = $1 AND user_id = $2 AND access = 'manage'`,
+            [currentVaultId, userId],
+          )
+          if (!m.length) { res.status(403).json({ error: 'Must be a vault manager to edit this app' }); return }
+        } else {
+          // Catalog app: must have servers.write
+          if (!hasServersWrite) { res.status(403).json({ error: 'Insufficient permissions' }); return }
+        }
+      }
+
+      const { name, category, vendor, version, eol_date, logo_url, docs_url, notes, vaultId } =
         req.body as Record<string, unknown>
+
+      // When moving an app to a new vault, check target vault too
+      if (vaultId !== undefined && !isAdmin) {
+        const targetVaultId = typeof vaultId === 'string' ? vaultId || null : null
+        if (targetVaultId) {
+          const { rows: tm } = await pool.query(
+            `SELECT 1 FROM vault_members WHERE vault_id = $1 AND user_id = $2 AND access = 'manage'`,
+            [targetVaultId, userId],
+          )
+          if (!tm.length) { res.status(403).json({ error: 'Must be a manager of the target vault to assign apps to it' }); return }
+        } else if (!hasServersWrite) {
+          // Moving to catalog (null vault) requires servers.write
+          res.status(403).json({ error: 'servers.write required to move an app to the catalog' }); return
+        }
+      }
+
       const updates: string[] = ['updated_at = NOW()']
       const params: unknown[] = []
       let idx = 1
@@ -125,6 +201,7 @@ export function appsRouter(pool: Pool): Router {
       if (logo_url !== undefined) { updates.push(`logo_url = $${idx++}`); params.push(typeof logo_url === 'string' ? logo_url.trim() || null : null) }
       if (docs_url !== undefined) { updates.push(`docs_url = $${idx++}`); params.push(typeof docs_url === 'string' ? docs_url.trim() || null : null) }
       if (notes !== undefined) { updates.push(`notes = $${idx++}`); params.push(typeof notes === 'string' ? notes.trim() || null : null) }
+      if (vaultId !== undefined) { updates.push(`vault_id = $${idx++}::uuid`); params.push(typeof vaultId === 'string' ? vaultId || null : null) }
 
       params.push(req.params['id'])
       const { rowCount } = await pool.query(
@@ -158,6 +235,33 @@ export function appsRouter(pool: Pool): Router {
           version: r.version,
           notes: r.notes,
           createdAt: r.created_at,
+        })),
+      })
+    } catch (err) { next(err) }
+  })
+
+  router.get('/apps/:id/secrets', requireAuth, requirePermission('secrets.view'), async (req, res, next) => {
+    try {
+      const userId = req.session.userId!
+      const { rows } = await pool.query<{
+        id: string; title: string; type: string; username: string | null
+        host_url: string | null; days_remaining: number | null; last_changed_at: string | null
+        vault_id: string; vault_name: string
+      }>(
+        `SELECT s.id, s.title, s.type, s.username, s.host_url,
+                s.days_remaining, s.last_changed_at, s.vault_id, v.name AS vault_name
+         FROM secrets s
+         JOIN vaults v ON v.id = s.vault_id
+         JOIN vault_members vm ON vm.vault_id = s.vault_id AND vm.user_id = $2
+         WHERE s.app_id = $1 AND s.deleted_at IS NULL
+         ORDER BY s.title`,
+        [req.params['id'], userId],
+      )
+      res.json({
+        secrets: rows.map((r) => ({
+          id: r.id, title: r.title, type: r.type, username: r.username,
+          hostUrl: r.host_url, daysRemaining: r.days_remaining,
+          lastChangedAt: r.last_changed_at, vaultId: r.vault_id, vaultName: r.vault_name,
         })),
       })
     } catch (err) { next(err) }

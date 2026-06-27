@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, type CSSProperties, type FormEvent } from 'react'
 import { AppShell } from '../components/AppShell.tsx'
+import { RevealDialog } from '../components/RevealDialog.tsx'
 import { api, ApiError } from '../lib/api.ts'
 
 interface App {
@@ -14,6 +15,8 @@ interface App {
   notes: string | null
   createdAt: string
   updatedAt: string
+  vaultId: string | null
+  vaultName: string | null
 }
 
 interface AppInstance {
@@ -25,6 +28,20 @@ interface AppInstance {
   notes: string | null
   createdAt: string
 }
+
+interface AppSecret {
+  id: string
+  title: string
+  type: string
+  username: string | null
+  hostUrl: string | null
+  daysRemaining: number | null
+  lastChangedAt: string | null
+  vaultId: string
+  vaultName: string
+}
+
+interface Vault { id: string; name: string }
 
 interface AppsPageProps {
   user: { displayName: string; email: string; permissions: string[] }
@@ -69,6 +86,27 @@ function EnvBadge({ env }: { env: string }) {
   )
 }
 
+function VaultBadge({ name }: { name: string }) {
+  return (
+    <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--accent)', background: 'var(--accent-soft)', border: '1px solid color-mix(in srgb, var(--accent) 30%, transparent)', borderRadius: 3, padding: '1px 6px', letterSpacing: '0.04em' }}>
+      vault: {name}
+    </span>
+  )
+}
+
+function SecretTypeBadge({ type }: { type: string }) {
+  const color =
+    type === 'ssh' ? 'var(--success)' :
+    type === 'api_key' ? 'var(--warning)' :
+    type === 'certificate' ? '#a78bfa' :
+    'var(--text-muted)'
+  return (
+    <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color, background: `color-mix(in srgb, ${color} 12%, transparent)`, border: `1px solid color-mix(in srgb, ${color} 25%, transparent)`, borderRadius: 3, padding: '1px 5px' }}>
+      {type.replace('_', ' ')}
+    </span>
+  )
+}
+
 export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps) {
   const [apps, setApps] = useState<App[]>([])
   const [loading, setLoading] = useState(true)
@@ -76,17 +114,26 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
   const [showAddForm, setShowAddForm] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
   const [addSubmitting, setAddSubmitting] = useState(false)
+  const [addVaultId, setAddVaultId] = useState('')
 
-  // Per-app expand/edit state
+  const [vaults, setVaults] = useState<Vault[]>([])
+
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [instances, setInstances] = useState<Record<string, AppInstance[]>>({})
   const [instancesLoading, setInstancesLoading] = useState<Record<string, boolean>>({})
+  const [secrets, setSecrets] = useState<Record<string, AppSecret[]>>({})
+  const [secretsLoading, setSecretsLoading] = useState<Record<string, boolean>>({})
   const [editingId, setEditingId] = useState<string | null>(null)
-  const [editDraft, setEditDraft] = useState<Partial<App>>({})
+  const [editDraft, setEditDraft] = useState<Partial<App & { vaultId: string }>>({})
   const [editSubmitting, setEditSubmitting] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
 
+  const [revealTarget, setRevealTarget] = useState<{ id: string; title: string } | null>(null)
+
   const canWrite = user.permissions.includes('servers.write')
+  const canViewSecrets = user.permissions.includes('secrets.view')
+  const isAdmin = user.permissions.includes('users.manage')
+  const canManageVaultApps = canWrite || isAdmin
 
   const fetchApps = useCallback(async () => {
     setLoading(true)
@@ -103,6 +150,13 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
 
   useEffect(() => { void fetchApps() }, [fetchApps])
 
+  useEffect(() => {
+    if (!canManageVaultApps) return
+    api.get<{ vaults: Vault[] }>('/vaults')
+      .then((d) => setVaults(d.vaults))
+      .catch(() => { /* non-fatal */ })
+  }, [canManageVaultApps])
+
   async function loadInstances(appId: string) {
     if (instances[appId]) return
     setInstancesLoading((p) => ({ ...p, [appId]: true }))
@@ -116,12 +170,26 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
     }
   }
 
+  async function loadSecrets(appId: string) {
+    if (secrets[appId]) return
+    setSecretsLoading((p) => ({ ...p, [appId]: true }))
+    try {
+      const data = await api.get<{ secrets: AppSecret[] }>(`/apps/${appId}/secrets`)
+      setSecrets((p) => ({ ...p, [appId]: data.secrets }))
+    } catch {
+      setSecrets((p) => ({ ...p, [appId]: [] }))
+    } finally {
+      setSecretsLoading((p) => ({ ...p, [appId]: false }))
+    }
+  }
+
   function toggleExpand(appId: string) {
     if (expandedId === appId) {
       setExpandedId(null)
     } else {
       setExpandedId(appId)
       void loadInstances(appId)
+      if (canViewSecrets) void loadSecrets(appId)
     }
   }
 
@@ -135,6 +203,7 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
       eolDate: app.eolDate ?? '',
       docsUrl: app.docsUrl ?? '',
       notes: app.notes ?? '',
+      vaultId: app.vaultId ?? '',
     })
     setEditError(null)
   }
@@ -152,8 +221,10 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
         version: (fd.get('version') as string).trim() || undefined,
         eol_date: (fd.get('eol_date') as string).trim() || undefined,
         docs_url: (fd.get('docs_url') as string).trim() || undefined,
+        vaultId: addVaultId || undefined,
       })
       setShowAddForm(false)
+      setAddVaultId('')
       void fetchApps()
     } catch (err) {
       setAddError(err instanceof ApiError ? err.message : 'Failed to create app')
@@ -176,6 +247,7 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
         eol_date: editDraft.eolDate || null,
         docs_url: editDraft.docsUrl || null,
         notes: editDraft.notes || null,
+        vaultId: editDraft.vaultId || null,
       })
       setEditingId(null)
       void fetchApps()
@@ -191,10 +263,18 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
 
   return (
     <AppShell title={appTitle} currentPath="/apps" onNavigate={onNavigate} user={user} onLogout={onLogout}>
+      {revealTarget && (
+        <RevealDialog
+          secretId={revealTarget.id}
+          secretTitle={revealTarget.title}
+          onClose={() => setRevealTarget(null)}
+        />
+      )}
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <h1 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: 'var(--text)' }}>Apps catalog</h1>
+          <h1 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: 'var(--text)' }}>Apps</h1>
           {canWrite && (
             <button
               onClick={() => { setShowAddForm((v) => !v); setAddError(null) }}
@@ -229,9 +309,18 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
               <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
                 Docs URL<input name="docs_url" type="url" placeholder="https://…" style={INPUT} />
               </label>
+              {canManageVaultApps && vaults.length > 0 && (
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-muted)', gridColumn: '1 / -1' }}>
+                  Vault (optional — assign to a vault to make it a shared team app)
+                  <select value={addVaultId} onChange={(e) => setAddVaultId(e.target.value)} style={{ ...INPUT, height: 30 }}>
+                    <option value="">— Personal / catalog app —</option>
+                    {vaults.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                  </select>
+                </label>
+              )}
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <button type="button" onClick={() => setShowAddForm(false)} style={GHOST_BTN}>Cancel</button>
+              <button type="button" onClick={() => { setShowAddForm(false); setAddVaultId('') }} style={GHOST_BTN}>Cancel</button>
               <button type="submit" disabled={addSubmitting} style={{ ...PRIMARY_BTN, height: 30, opacity: addSubmitting ? 0.6 : 1 }}>
                 {addSubmitting ? 'Creating…' : 'Create app'}
               </button>
@@ -252,8 +341,8 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
           <div style={{ padding: '32px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div>
         ) : apps.length === 0 ? (
           <div style={{ padding: '48px 0', textAlign: 'center' }}>
-            <p style={{ margin: '0 0 4px', fontSize: 14, fontWeight: 500, color: 'var(--text)' }}>No apps in the catalog yet.</p>
-            <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--text-muted)' }}>Add an app to track versions, EOL dates, and where it runs.</p>
+            <p style={{ margin: '0 0 4px', fontSize: 14, fontWeight: 500, color: 'var(--text)' }}>No apps yet.</p>
+            <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--text-muted)' }}>Add an app to track versions, EOL dates, and shared credentials.</p>
             {canWrite && (
               <button onClick={() => setShowAddForm(true)} style={{ height: 30, padding: '0 14px', background: 'var(--accent-soft)', border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)', color: 'var(--accent)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>+ Add app</button>
             )}
@@ -285,6 +374,7 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                           <span style={{ fontSize: 10, color: expandedId === app.id ? 'var(--accent)' : 'var(--text-subtle)', transition: 'transform 0.15s', display: 'inline-block', transform: expandedId === app.id ? 'rotate(90deg)' : 'none' }}>▶</span>
                           <span style={{ fontWeight: 500, color: 'var(--text)' }}>{app.name}</span>
+                          {app.vaultId && app.vaultName && <VaultBadge name={app.vaultName} />}
                         </div>
                       </td>
                       <td style={TD}>{app.category ?? <span style={{ color: 'var(--text-subtle)' }}>—</span>}</td>
@@ -344,10 +434,19 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
                                 Docs URL
                                 <input type="url" value={editDraft.docsUrl ?? ''} onChange={(e) => setEditDraft((p) => ({ ...p, docsUrl: e.target.value }))} placeholder="https://…" style={INPUT} />
                               </label>
-                              <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', gridColumn: '1 / -1' }}>
+                              <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)' }}>
                                 Notes
                                 <input value={editDraft.notes ?? ''} onChange={(e) => setEditDraft((p) => ({ ...p, notes: e.target.value }))} placeholder="Any notes about this app" style={INPUT} />
                               </label>
+                              {canManageVaultApps && vaults.length > 0 && (
+                                <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', gridColumn: 'span 2' }}>
+                                  Vault
+                                  <select value={editDraft.vaultId ?? ''} onChange={(e) => setEditDraft((p) => ({ ...p, vaultId: e.target.value }))} style={{ ...INPUT, height: 30 }}>
+                                    <option value="">— Personal / catalog app —</option>
+                                    {vaults.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                                  </select>
+                                </label>
+                              )}
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
                               <button type="button" onClick={() => setEditingId(null)} style={GHOST_BTN}>Cancel</button>
@@ -360,37 +459,79 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
                       </tr>
                     )}
 
-                    {/* Instances expansion row */}
+                    {/* Expanded detail row */}
                     {expandedId === app.id && editingId !== app.id && (
                       <tr key={`${app.id}-expand`} style={{ borderBottom: '1px solid var(--border)' }}>
-                        <td colSpan={canWrite ? 7 : 6} style={{ padding: '10px 14px 14px', background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
-                          <div style={{ fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600, marginBottom: 8 }}>
-                            Running on
-                          </div>
-                          {instancesLoading[app.id] ? (
-                            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Loading…</div>
-                          ) : !instances[app.id] || instances[app.id]!.length === 0 ? (
-                            <div style={{ fontSize: 12, color: 'var(--text-subtle)', fontStyle: 'italic' }}>Not deployed on any server yet.</div>
-                          ) : (
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                              {instances[app.id]!.map((inst) => (
-                                <button
-                                  key={inst.id}
-                                  onClick={() => onNavigate?.(`/servers/${inst.serverId}`)}
-                                  style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', transition: 'border-color 0.15s' }}
-                                  onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--accent)')}
-                                  onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
-                                >
-                                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>{inst.hostname}</span>
-                                  <EnvBadge env={inst.environment} />
-                                  {inst.version && (
-                                    <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>v{inst.version}</span>
-                                  )}
-                                  <span style={{ fontSize: 11, color: 'var(--accent)', marginLeft: 2 }}>→</span>
-                                </button>
-                              ))}
+                        <td colSpan={canWrite ? 7 : 6} style={{ padding: '12px 14px 16px', background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+                            {app.notes && (
+                              <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)', fontStyle: 'italic' }}>{app.notes}</p>
+                            )}
+
+                            {/* Credentials section */}
+                            {canViewSecrets && (
+                              <div>
+                                <div style={{ fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600, marginBottom: 8 }}>Credentials</div>
+                                {secretsLoading[app.id] ? (
+                                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Loading…</div>
+                                ) : !secrets[app.id] || secrets[app.id]!.length === 0 ? (
+                                  <div style={{ fontSize: 12, color: 'var(--text-subtle)', fontStyle: 'italic' }}>No credentials linked to this app.</div>
+                                ) : (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                    {secrets[app.id]!.map((s) => (
+                                      <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px', background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
+                                        <SecretTypeBadge type={s.type} />
+                                        <span style={{ fontWeight: 500, fontSize: 13, color: 'var(--text)', flex: 1 }}>{s.title}</span>
+                                        {s.username && (
+                                          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-muted)' }}>{s.username}</span>
+                                        )}
+                                        <span style={{ fontSize: 11, color: 'var(--text-subtle)' }}>{s.vaultName}</span>
+                                        <button
+                                          onClick={() => setRevealTarget({ id: s.id, title: s.title })}
+                                          style={{ height: 24, padding: '0 10px', background: 'var(--accent-soft)', border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)', color: 'var(--accent)', fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
+                                        >
+                                          Reveal
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Running on servers */}
+                            <div>
+                              <div style={{ fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600, marginBottom: 8 }}>
+                                Running on
+                              </div>
+                              {instancesLoading[app.id] ? (
+                                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Loading…</div>
+                              ) : !instances[app.id] || instances[app.id]!.length === 0 ? (
+                                <div style={{ fontSize: 12, color: 'var(--text-subtle)', fontStyle: 'italic' }}>Not deployed on any server yet.</div>
+                              ) : (
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                  {instances[app.id]!.map((inst) => (
+                                    <button
+                                      key={inst.id}
+                                      onClick={() => onNavigate?.(`/servers/${inst.serverId}`)}
+                                      style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', transition: 'border-color 0.15s' }}
+                                      onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'var(--accent)')}
+                                      onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'var(--border)')}
+                                    >
+                                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>{inst.hostname}</span>
+                                      <EnvBadge env={inst.environment} />
+                                      {inst.version && (
+                                        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>v{inst.version}</span>
+                                      )}
+                                      <span style={{ fontSize: 11, color: 'var(--accent)', marginLeft: 2 }}>→</span>
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
                             </div>
-                          )}
+
+                          </div>
                         </td>
                       </tr>
                     )}
