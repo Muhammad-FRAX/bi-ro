@@ -11,8 +11,11 @@ import { errorHandler } from './middleware/errorHandler.ts'
 import { createSessionMiddleware } from './middleware/session.ts'
 import { setupGuard } from './middleware/setupGuard.ts'
 import { SelfAuthProvider } from './auth/selfProvider.ts'
+import { KeycloakProvider } from './auth/keycloakProvider.ts'
+import { LdapProvider } from './auth/ldapProvider.ts'
 import healthRouter from './routes/health.ts'
 import { authRouter } from './routes/auth.ts'
+import { keycloakAuthRouter } from './routes/keycloakAuth.ts'
 import { setupRouter } from './routes/setup.ts'
 import { adminRouter } from './routes/admin.ts'
 import { serversRouter } from './routes/servers.ts'
@@ -26,7 +29,7 @@ import { notificationsRouter } from './routes/notifications.ts'
 import { documentsRouter } from './routes/documents.ts'
 import { startExpiryWorker } from './services/expiryWorker.ts'
 import { startDigestWorker } from './services/digestWorker.ts'
-import { initConfig, getConfig } from './config.ts'
+import { initConfig, getConfig, type KeycloakConfig, type LdapConfig } from './config.ts'
 import { runMigrations } from './db/migrate.ts'
 import { initPool, getPool } from './db/pool.ts'
 
@@ -41,6 +44,8 @@ interface AppOptions {
   adminPassword?: string
   authMode?: 'self' | 'keycloak' | 'ldap'
   uploadsDir?: string
+  keycloak?: KeycloakConfig
+  ldap?: LdapConfig
 }
 
 // createApp: accepts optional opts. When omitted (unit tests), auth middleware is skipped.
@@ -54,7 +59,21 @@ export function createApp(opts?: AppOptions): express.Express {
   app.use(express.urlencoded({ extended: true }))
 
   if (opts) {
-    const provider = new SelfAuthProvider(opts.pool)
+    // Select AuthProvider based on AUTH_MODE
+    let provider: SelfAuthProvider | KeycloakProvider | LdapProvider
+    let keycloakProvider: KeycloakProvider | null = null
+    if (opts.authMode === 'keycloak') {
+      keycloakProvider = new KeycloakProvider(opts.pool, opts.keycloak ?? {
+        issuer: undefined, clientId: undefined, clientSecret: undefined,
+        redirectUri: undefined, defaultRole: 'viewer',
+      })
+      provider = keycloakProvider
+    } else if (opts.authMode === 'ldap') {
+      provider = new LdapProvider(opts.pool, opts.ldap ?? { url: undefined, tlsEnabled: false })
+    } else {
+      provider = new SelfAuthProvider(opts.pool)
+    }
+
     app.use(createSessionMiddleware({ secret: opts.sessionSecret, secure: opts.secureCookie }))
     // Setup guard blocks all /api routes except /setup/* and /health until initialized
     app.use('/api', setupGuard(opts.pool))
@@ -64,6 +83,10 @@ export function createApp(opts?: AppOptions): express.Express {
       authMode: opts.authMode ?? 'self',
     }))
     app.use('/api', authRouter(opts.pool, provider))
+    // Keycloak OIDC routes (only wired when AUTH_MODE=keycloak)
+    if (keycloakProvider) {
+      app.use('/api', keycloakAuthRouter(keycloakProvider))
+    }
     app.use('/api', adminRouter(opts.pool))
     app.use('/api', serversRouter(opts.pool))
     app.use('/api', appsRouter(opts.pool))
@@ -114,6 +137,8 @@ async function main(): Promise<void> {
     adminPassword: cfg.adminPassword,
     authMode: cfg.authMode,
     uploadsDir: cfg.uploadsDir,
+    keycloak: cfg.keycloak,
+    ldap: cfg.ldap,
   })
 
   app.listen(cfg.port, () => {
