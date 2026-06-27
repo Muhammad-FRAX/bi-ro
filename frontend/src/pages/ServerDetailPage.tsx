@@ -761,6 +761,101 @@ function FilesystemTab({ serverId, canWrite }: FilesystemTabProps) {
   )
 }
 
+// ── Searchable app picker (searches global catalog, auto-links server instance) ─
+
+interface CatalogApp { id: string; name: string; category: string | null }
+
+interface AppPickerProps {
+  instances: AppInstance[]    // instances already on this server (for auto-linking)
+  selectedName: string        // currently displayed label
+  onSelect: (instanceId: string, label: string) => void
+  onClear: () => void
+  inputStyle: CSSProperties
+}
+
+function AppInstancePicker({ instances, selectedName, onSelect, onClear, inputStyle }: AppPickerProps) {
+  const [allApps, setAllApps] = useState<CatalogApp[]>([])
+  const [search, setSearch] = useState('')
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  // Fetch global catalog once
+  useEffect(() => {
+    api.get<{ apps: CatalogApp[] }>('/apps')
+      .then((d) => setAllApps(d.apps))
+      .catch(() => {})
+  }, [])
+
+  const isSelected = !!selectedName
+  const filtered = search
+    ? allApps.filter((a) => a.name.toLowerCase().includes(search.toLowerCase()))
+    : allApps
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [])
+
+  function handlePick(app: CatalogApp) {
+    // Auto-wire to existing instance on this server if available
+    const existingInstance = instances.find((i) => i.appId === app.id)
+    onSelect(existingInstance?.id ?? '', app.name)
+    setSearch('')
+    setOpen(false)
+  }
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <input
+        readOnly={isSelected}
+        value={isSelected ? selectedName : search}
+        placeholder="Search catalog…"
+        onFocus={() => { if (!isSelected) setOpen(true) }}
+        onChange={(e) => { setSearch(e.target.value); setOpen(true) }}
+        style={{ ...inputStyle, cursor: isSelected ? 'default' : 'text', paddingRight: isSelected ? 24 : undefined }}
+      />
+      {isSelected && (
+        <button
+          type="button"
+          onClick={() => { onClear(); setSearch('') }}
+          style={{ position: 'absolute', right: 4, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: '0 2px' }}
+          aria-label="Clear"
+        >×</button>
+      )}
+      {open && !isSelected && (
+        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 50, background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', boxShadow: '0 4px 12px rgba(0,0,0,0.25)', maxHeight: 200, overflowY: 'auto', marginTop: 2 }}>
+          <div onMouseDown={() => { onClear(); setOpen(false) }} style={{ padding: '6px 10px', fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer', borderBottom: '1px solid var(--border)' }}>
+            — none —
+          </div>
+          {allApps.length === 0 ? (
+            <div style={{ padding: '8px 10px', fontSize: 12, color: 'var(--text-subtle)', fontStyle: 'italic' }}>Loading apps…</div>
+          ) : filtered.length === 0 ? (
+            <div style={{ padding: '8px 10px', fontSize: 12, color: 'var(--text-subtle)', fontStyle: 'italic' }}>No matches</div>
+          ) : filtered.map((app) => {
+            const hasInstance = instances.some((i) => i.appId === app.id)
+            return (
+              <div
+                key={app.id}
+                onMouseDown={() => handlePick(app)}
+                style={{ padding: '6px 10px', fontSize: 12, color: 'var(--text)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-elev-2)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+              >
+                <span style={{ fontWeight: 500, flex: 1 }}>{app.name}</span>
+                {app.category && <span style={{ fontSize: 10, color: 'var(--text-subtle)' }}>{app.category}</span>}
+                {hasInstance && <span style={{ fontSize: 10, color: 'var(--success)', fontWeight: 600 }}>on server</span>}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Ports tab ──────────────────────────────────────────────────────────────────
 
 interface PortsTabProps {
@@ -775,15 +870,30 @@ function PortsTab({ serverId, ports, instances, canWrite, onRefresh }: PortsTabP
   const [showForm, setShowForm] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  // Add form controlled state for app picker + label auto-fill
+  const [addInstanceId, setAddInstanceId] = useState('')
+  const [addAppLabel, setAddAppLabel] = useState('')
+
   const [editPortId, setEditPortId] = useState<string | null>(null)
   const [editPortSubmitting, setEditPortSubmitting] = useState(false)
   const [editPortError, setEditPortError] = useState<string | null>(null)
+  // Edit form controlled state
+  const [editInstanceId, setEditInstanceId] = useState('')
+  const [editAppLabel, setEditAppLabel] = useState('')
 
   const INPUT: CSSProperties = {
     height: 28, padding: '0 8px', background: 'var(--bg-elev-2)', border: '1px solid var(--border)',
     borderRadius: 'var(--radius-sm)', color: 'var(--text)', fontSize: 12, fontFamily: 'inherit', outline: 'none',
+    width: '100%', boxSizing: 'border-box',
   }
   const SELECT: CSSProperties = { ...INPUT, cursor: 'pointer' }
+
+  function openEditPort(p: Port) {
+    setEditPortId(p.id)
+    setEditPortError(null)
+    setEditInstanceId(p.appInstanceId ?? '')
+    setEditAppLabel(p.appLabel ?? '')
+  }
 
   async function handleAddPort(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -794,12 +904,14 @@ function PortsTab({ serverId, ports, instances, canWrite, onRefresh }: PortsTabP
       await api.post(`/servers/${serverId}/ports`, {
         number: parseInt(fd.get('number') as string, 10),
         protocol: fd.get('protocol') as string,
-        appLabel: (fd.get('appLabel') as string).trim() || undefined,
+        appLabel: addAppLabel.trim() || undefined,
         exposure: fd.get('exposure') as string,
         description: (fd.get('description') as string).trim() || undefined,
-        appInstanceId: (fd.get('appInstanceId') as string) || undefined,
+        appInstanceId: addInstanceId || undefined,
       })
       setShowForm(false)
+      setAddInstanceId('')
+      setAddAppLabel('')
       onRefresh()
     } catch (err) {
       setFormError(err instanceof ApiError ? err.message : 'Failed to add port')
@@ -819,7 +931,8 @@ function PortsTab({ serverId, ports, instances, canWrite, onRefresh }: PortsTabP
     const fd = new FormData(e.currentTarget)
     try {
       await api.patch(`/ports/${portId}`, {
-        appLabel: (fd.get('appLabel') as string).trim() || null,
+        appLabel: editAppLabel.trim() || null,
+        appInstanceId: editInstanceId || null,
         exposure: fd.get('exposure') as string,
         description: (fd.get('description') as string).trim() || null,
       })
@@ -844,7 +957,7 @@ function PortsTab({ serverId, ports, instances, canWrite, onRefresh }: PortsTabP
         </p>
         {canWrite && (
           <button
-            onClick={() => setShowForm((v) => !v)}
+            onClick={() => { setShowForm((v) => !v); setAddInstanceId(''); setAddAppLabel('') }}
             style={{ height: 28, padding: '0 10px', background: 'var(--accent-soft)', border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)', color: 'var(--accent)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}
           >
             {showForm ? 'Cancel' : '+ Add port'}
@@ -879,17 +992,23 @@ function PortsTab({ serverId, ports, instances, canWrite, onRefresh }: PortsTabP
               </select>
             </label>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)' }}>
-              App label
-              <input name="appLabel" placeholder="PostgreSQL" style={INPUT} />
+              App label (display name)
+              <input
+                value={addAppLabel}
+                onChange={(e) => setAddAppLabel(e.target.value)}
+                placeholder="PostgreSQL"
+                style={INPUT}
+              />
             </label>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)' }}>
-              App instance
-              <select name="appInstanceId" style={SELECT}>
-                <option value="">— none —</option>
-                {instances.map((inst) => (
-                  <option key={inst.id} value={inst.id}>{inst.app.name}</option>
-                ))}
-              </select>
+              Link to app
+              <AppInstancePicker
+                instances={instances}
+                selectedName={addAppLabel}
+                onSelect={(instanceId, name) => { setAddInstanceId(instanceId); setAddAppLabel(name) }}
+                onClear={() => { setAddInstanceId(''); setAddAppLabel('') }}
+                inputStyle={INPUT}
+              />
             </label>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', gridColumn: '1 / -1' }}>
               Description
@@ -934,9 +1053,19 @@ function PortsTab({ serverId, ports, instances, canWrite, onRefresh }: PortsTabP
                       <td colSpan={canWrite ? 6 : 5} style={{ padding: '10px 12px' }}>
                         <form onSubmit={(e) => { void handleEditPort(e, p.id) }} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'flex-end' }}>
                           {editPortError && <p style={{ width: '100%', margin: 0, fontSize: 12, color: 'var(--danger)' }}>{editPortError}</p>}
-                          <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)' }}>
+                          <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', minWidth: 130 }}>
                             App label
-                            <input name="appLabel" defaultValue={p.appLabel ?? ''} style={{ ...INPUT, width: 130 }} />
+                            <input value={editAppLabel} onChange={(e) => setEditAppLabel(e.target.value)} style={{ ...INPUT, width: 130 }} />
+                          </label>
+                          <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', minWidth: 160 }}>
+                            Link to app
+                            <AppInstancePicker
+                              instances={instances}
+                              selectedName={editAppLabel}
+                              onSelect={(instanceId, name) => { setEditInstanceId(instanceId); setEditAppLabel(name) }}
+                              onClear={() => { setEditInstanceId(''); setEditAppLabel('') }}
+                              inputStyle={{ ...INPUT, width: 160 }}
+                            />
                           </label>
                           <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)' }}>
                             Exposure
@@ -973,7 +1102,7 @@ function PortsTab({ serverId, ports, instances, canWrite, onRefresh }: PortsTabP
                       {canWrite && (
                         <td style={{ ...TD, textAlign: 'right' }}>
                           <button
-                            onClick={() => { setEditPortId(p.id); setEditPortError(null) }}
+                            onClick={() => openEditPort(p)}
                             style={{ background: 'none', border: 'none', color: 'var(--accent)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', padding: '2px 6px' }}
                           >
                             Edit
@@ -1186,7 +1315,7 @@ function DaysRemainingBadgeCreds({ days }: { days: number | null }) {
 
 function CredentialsTab({ credentials, loading, canReveal, onReveal, onNavigate }: CredentialsTabProps) {
   const TR: CSSProperties = { height: 34, borderBottom: '1px solid var(--border)' }
-  const TD: CSSProperties = { padding: '0 10px', fontSize: 13, color: 'var(--text)' }
+  const TD: CSSProperties = { padding: '0 10px', fontSize: 13, color: 'var(--text)', textAlign: 'left' }
   const TH: CSSProperties = { ...TD, fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600 }
 
   if (loading) {

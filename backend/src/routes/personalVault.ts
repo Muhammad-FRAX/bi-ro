@@ -267,16 +267,18 @@ export function personalVaultRouter(pool: Pool): Router {
   })
 
   // ── PATCH /api/personal-vault/entries/:id ────────────────────────────────────
-  // Update metadata only — no password needed for metadata
+  // Update metadata; optionally rotate value (requires vault password)
   router.patch('/personal-vault/entries/:id', async (req, res, next) => {
     try {
       const userId = req.session.userId!
       const { id } = req.params
-      const { title, url, username, logo_url } = req.body as {
+      const { title, url, username, logo_url, newValue, password } = req.body as {
         title?: unknown
         url?: unknown
         username?: unknown
         logo_url?: unknown
+        newValue?: unknown
+        password?: unknown
       }
 
       const updates: string[] = ['updated_at = NOW()']
@@ -298,6 +300,36 @@ export function personalVaultRouter(pool: Pool): Router {
       if (logo_url !== undefined) {
         updates.push(`logo_url = $${idx++}`)
         params.push(typeof logo_url === 'string' && logo_url.trim() ? logo_url.trim() : null)
+      }
+
+      // Value rotation — requires vault password
+      if (typeof newValue === 'string' && newValue) {
+        if (typeof password !== 'string' || !password) {
+          res.status(400).json({ error: 'password is required to update the secret value' })
+          return
+        }
+        const { rows: userRows } = await pool.query<{
+          personal_vault_key_salt: Buffer | null
+          personal_vault_key_cipher: Buffer | null
+        }>(
+          `SELECT personal_vault_key_salt, personal_vault_key_cipher FROM users WHERE id = $1`,
+          [userId],
+        )
+        if (!userRows[0]?.personal_vault_key_salt || !userRows[0]?.personal_vault_key_cipher) {
+          res.status(422).json({ error: 'Personal vault not initialized' })
+          return
+        }
+        let pvk: Buffer
+        try {
+          const wrapperKey = deriveWrapperKey(password, userRows[0].personal_vault_key_salt)
+          pvk = unwrapPvk(userRows[0].personal_vault_key_cipher, wrapperKey)
+        } catch {
+          res.status(401).json({ error: 'Incorrect password' })
+          return
+        }
+        const { ciphertext, iv, authTag } = encryptPersonalSecret(newValue, pvk)
+        updates.push(`ciphertext = $${idx++}`, `iv = $${idx++}`, `auth_tag = $${idx++}`)
+        params.push(ciphertext, iv, authTag)
       }
 
       params.push(id, userId)

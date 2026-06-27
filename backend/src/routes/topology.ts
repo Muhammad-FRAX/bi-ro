@@ -94,10 +94,15 @@ async function buildFleetTopology(pool: Pool): Promise<TopologyResult> {
      ORDER BY created_at`,
   )
 
+  // Fetch ports for all servers
+  const serverIds = serversResult.rows.map((s) => s.id)
+  const portsByServer = await fetchPortsByServer(pool, serverIds)
+
   return buildTopologyResponse(
     serversResult.rows,
     instancesResult.rows,
     connectionsResult.rows,
+    portsByServer,
   )
 }
 
@@ -123,8 +128,8 @@ async function buildServerTopology(pool: Pool, serverId: string): Promise<Topolo
   const instanceIds = instancesOnServer.rows.map((r) => r.id)
 
   if (instanceIds.length === 0) {
-    // Server exists but has no instances — return just the server node
-    return buildTopologyResponse(serversResult.rows, [], [])
+    const portsByServer = await fetchPortsByServer(pool, serversResult.rows.map((s) => s.id))
+    return buildTopologyResponse(serversResult.rows, [], [], portsByServer)
   }
 
   // Find connections where any instance on this server is involved (one hop out)
@@ -188,11 +193,49 @@ async function buildServerTopology(pool: Pool, serverId: string): Promise<Topolo
     [allServerIdsArr],
   )
 
+  const portsByServer = await fetchPortsByServer(pool, Array.from(allServerIds))
+
   return buildTopologyResponse(
     allServersResult.rows,
     instancesResult.rows,
     connectionsResult.rows,
+    portsByServer,
   )
+}
+
+// ── Fetch ports grouped by server ────────────────────────────────────────────
+
+async function fetchPortsByServer(
+  pool: Pool,
+  serverIds: string[],
+): Promise<Map<string, Array<{ number: number; protocol: string; appLabel: string | null; exposure: string }>>> {
+  const map = new Map<string, Array<{ number: number; protocol: string; appLabel: string | null; exposure: string }>>()
+  if (serverIds.length === 0) return map
+
+  const { rows } = await pool.query<{
+    server_id: string
+    number: number
+    protocol: string
+    app_label: string | null
+    exposure: string
+  }>(
+    `SELECT server_id, number, protocol, app_label, exposure
+     FROM ports
+     WHERE server_id = ANY($1::uuid[]) AND status != 'closed'
+     ORDER BY server_id, number`,
+    [serverIds],
+  )
+
+  for (const row of rows) {
+    if (!map.has(row.server_id)) map.set(row.server_id, [])
+    map.get(row.server_id)!.push({
+      number: row.number,
+      protocol: row.protocol,
+      appLabel: row.app_label,
+      exposure: row.exposure,
+    })
+  }
+  return map
 }
 
 // ── Map DB rows to topology response ─────────────────────────────────────────
@@ -207,6 +250,7 @@ function buildTopologyResponse(
     label: string | null
     protocol: string | null
   }>,
+  portsByServer: Map<string, Array<{ number: number; protocol: string; appLabel: string | null; exposure: string }>>,
 ): TopologyResult {
   const nodes: TopologyNode[] = [
     ...servers.map((s) => ({
@@ -217,6 +261,7 @@ function buildTopologyResponse(
         environment: s.environment,
         status: s.status,
         serverId: s.id,
+        ports: portsByServer.get(s.id) ?? [],
       },
     })),
     ...instances.map((i) => ({

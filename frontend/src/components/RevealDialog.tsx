@@ -165,20 +165,18 @@ export function RevealDialog({ secretId, secretTitle, onClose }: RevealDialogPro
   }
 
   async function handleCopy() {
-    if (!revealedValue) return
+    if (!revealedValue || secondsLeft <= 0) return
     try {
       await navigator.clipboard.writeText(revealedValue)
       setCopied(true)
-      // §20 F3.5 — clipboard auto-clear is best-effort (unreliable cross-OS)
-      // The 10s re-mask is the real guarantee
+      if (clipboardClearRef.current) clearTimeout(clipboardClearRef.current)
+      // Clear clipboard exactly when the reveal expires, not a fixed 10s from copy
       clipboardClearRef.current = setTimeout(() => {
-        navigator.clipboard.writeText('').catch(() => {
-          // Best-effort: ignore errors (not all browsers allow blank-write)
-        })
+        navigator.clipboard.writeText('').catch(() => {})
         setCopied(false)
-      }, REVEAL_SECONDS * 1000)
+      }, secondsLeft * 1000)
     } catch {
-      // Clipboard API not available — silently ignore per §20 F3.5
+      // Clipboard API not available — silently ignore
     }
   }
 
@@ -243,10 +241,28 @@ export function RevealDialog({ secretId, secretTitle, onClose }: RevealDialogPro
               {revealedValue}
             </div>
 
-            <div style={{ display: 'flex', gap: 8 }}>
-              <Button intent="primary" size="sm" onClick={() => void handleCopy()}>
-                {copied ? '✓ Copied' : 'Copy'}
-              </Button>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button
+                onClick={() => void handleCopy()}
+                title={copied ? 'Copied!' : 'Copy to clipboard'}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                  height: 30, padding: '0 12px',
+                  background: copied ? 'color-mix(in srgb, var(--success) 15%, transparent)' : 'var(--accent-soft)',
+                  border: `1px solid ${copied ? 'color-mix(in srgb, var(--success) 40%, transparent)' : 'var(--accent)'}`,
+                  borderRadius: 'var(--radius-sm)',
+                  color: copied ? 'var(--success)' : 'var(--accent)',
+                  fontSize: 12, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit',
+                  transition: 'all 0.15s',
+                }}
+              >
+                {copied ? (
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>
+                ) : (
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/><path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5h-.5A1.5 1.5 0 0 0 3 3v.5h10V3a1.5 1.5 0 0 0-1.5-1.5H11A1.5 1.5 0 0 0 9.5 0h-3z"/></svg>
+                )}
+                {copied ? 'Copied!' : 'Copy'}
+              </button>
               <Button intent="ghost" size="sm" onClick={() => { setRevealedValue(null); onClose() }}>
                 Close
               </Button>

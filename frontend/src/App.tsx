@@ -17,6 +17,7 @@ import { RecycleBinPage } from './pages/RecycleBinPage.tsx'
 import { AuditPage } from './pages/AuditPage.tsx'
 import { BackupPage } from './pages/BackupPage.tsx'
 import { PersonalPage } from './pages/PersonalPage.tsx'
+import { ScriptsPage } from './pages/ScriptsPage.tsx'
 import { CommandPalette } from './components/CommandPalette.tsx'
 import { api } from './lib/api.ts'
 
@@ -179,7 +180,11 @@ export default function App() {
 
   const palette = paletteOpen ? <CommandPalette onNavigate={navigate} onClose={() => setPaletteOpen(false)} /> : null
 
+  const perms = user.permissions
+  const has = (...p: string[]) => p.some((x) => perms.includes(x))
+
   if (currentPath === '/settings') {
+    if (!has('users.manage')) { navigate('/'); return null }
     return (
       <ThemeProvider>
         {palette}
@@ -189,6 +194,7 @@ export default function App() {
   }
 
   if (currentPath === '/servers') {
+    if (!has('infra.read')) { navigate('/'); return null }
     return (
       <ThemeProvider>
         {palette}
@@ -200,6 +206,7 @@ export default function App() {
   // /servers/:id — match server detail route
   const serverDetailMatch = currentPath.match(/^\/servers\/([^/]+)$/)
   if (serverDetailMatch) {
+    if (!has('infra.read')) { navigate('/'); return null }
     return (
       <ThemeProvider>
         {palette}
@@ -209,6 +216,7 @@ export default function App() {
   }
 
   if (currentPath === '/apps') {
+    if (!has('infra.read')) { navigate('/'); return null }
     return (
       <ThemeProvider>
         {palette}
@@ -218,6 +226,7 @@ export default function App() {
   }
 
   if (currentPath === '/topology') {
+    if (!has('infra.read')) { navigate('/'); return null }
     return (
       <ThemeProvider>
         {palette}
@@ -227,6 +236,7 @@ export default function App() {
   }
 
   if (currentPath === '/vault') {
+    if (!has('secrets.view')) { navigate('/'); return null }
     return (
       <ThemeProvider>
         {palette}
@@ -238,6 +248,7 @@ export default function App() {
   // /vault/:id
   const vaultDetailMatch = currentPath.match(/^\/vault\/([^/]+)$/)
   if (vaultDetailMatch) {
+    if (!has('secrets.view')) { navigate('/'); return null }
     return (
       <ThemeProvider>
         {palette}
@@ -249,6 +260,7 @@ export default function App() {
   // /secrets/:id
   const secretDetailMatch = currentPath.match(/^\/secrets\/([^/]+)$/)
   if (secretDetailMatch) {
+    if (!has('secrets.view')) { navigate('/'); return null }
     return (
       <ThemeProvider>
         {palette}
@@ -266,6 +278,16 @@ export default function App() {
     )
   }
 
+  if (currentPath === '/scripts') {
+    if (!has('infra.read')) { navigate('/'); return null }
+    return (
+      <ThemeProvider>
+        {palette}
+        <ScriptsPage {...sharedProps} />
+      </ThemeProvider>
+    )
+  }
+
   if (currentPath === '/notifications') {
     return (
       <ThemeProvider>
@@ -276,6 +298,7 @@ export default function App() {
   }
 
   if (currentPath === '/documents') {
+    if (!has('docs.read')) { navigate('/'); return null }
     return (
       <ThemeProvider>
         {palette}
@@ -285,6 +308,7 @@ export default function App() {
   }
 
   if (currentPath === '/recycle-bin') {
+    if (!has('servers.write', 'docs.write', 'users.manage')) { navigate('/'); return null }
     return (
       <ThemeProvider>
         {palette}
@@ -294,6 +318,7 @@ export default function App() {
   }
 
   if (currentPath === '/audit') {
+    if (!has('audit.read')) { navigate('/'); return null }
     return (
       <ThemeProvider>
         {palette}
@@ -303,6 +328,7 @@ export default function App() {
   }
 
   if (currentPath === '/backup') {
+    if (!has('users.manage')) { navigate('/'); return null }
     return (
       <ThemeProvider>
         {palette}

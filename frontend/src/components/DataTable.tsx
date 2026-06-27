@@ -14,6 +14,7 @@ interface DataTableProps<T extends object> {
   loading?: boolean
   emptyMessage?: ReactNode
   rowActions?: (row: T) => ReactNode
+  onRowClick?: (row: T) => void
 }
 
 const cellStyle: CSSProperties = {
@@ -68,6 +69,7 @@ export function DataTable<T extends object>({
   loading = false,
   emptyMessage = 'No data.',
   rowActions,
+  onRowClick,
 }: DataTableProps<T>) {
   const totalCols = columns.length + (rowActions ? 1 : 0)
 
@@ -128,7 +130,11 @@ export function DataTable<T extends object>({
               rows.map((row) => (
                 <tr
                   key={String(row[keyField])}
-                  style={{ transition: 'background 80ms' }}
+                  style={{ transition: 'background 80ms', cursor: onRowClick ? 'pointer' : undefined }}
+                  onClick={onRowClick ? () => onRowClick(row) : undefined}
+                  onKeyDown={onRowClick ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(row) } } : undefined}
+                  tabIndex={onRowClick ? 0 : undefined}
+                  role={onRowClick ? 'button' : undefined}
                   onMouseEnter={(e) => {
                     ;(e.currentTarget as HTMLTableRowElement).style.background = 'var(--accent-soft)'
                   }}

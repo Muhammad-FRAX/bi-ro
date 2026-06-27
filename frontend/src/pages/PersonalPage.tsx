@@ -1,5 +1,6 @@
-import { useState, useEffect, type FormEvent, type CSSProperties } from 'react'
+import { useState, useEffect, useRef, type FormEvent, type CSSProperties } from 'react'
 import { AppShell } from '../components/AppShell.tsx'
+import { ConfirmDialog } from '../components/ConfirmDialog.tsx'
 import { api, ApiError } from '../lib/api.ts'
 
 interface Entry {
@@ -44,6 +45,8 @@ const BTN_GHOST: CSSProperties = {
   cursor: 'pointer', fontFamily: 'inherit',
 }
 
+const REVEAL_SECONDS = 10
+
 function Favicon({ url }: { url: string | null }) {
   if (!url) return <span style={{ fontSize: 18, lineHeight: 1 }}>🔑</span>
   try {
@@ -79,7 +82,13 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
   const [addSubmitting, setAddSubmitting] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
 
-  // Reveal state: entryId → { value, expiresAt }
+  // Edit entry form
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState({ title: '', url: '', username: '', newPassword: '', vaultPassword: '' })
+  const [editSubmitting, setEditSubmitting] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
+
+  // Reveal state: entryId → { value, exp }
   const [revealed, setRevealed] = useState<Record<string, { value: string; exp: number }>>({})
   const [revealingId, setRevealingId] = useState<string | null>(null)
   const [revealPw, setRevealPw] = useState('')
@@ -88,6 +97,30 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
 
   // Delete
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; title: string } | null>(null)
+
+  // Clipboard copy
+  const [copiedEntryId, setCopiedEntryId] = useState<string | null>(null)
+  const clipClearRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => () => { if (clipClearRef.current) clearTimeout(clipClearRef.current) }, [])
+
+  // Countdown tick — fires every second, removes expired reveals and re-renders countdown
+  useEffect(() => {
+    const id = setInterval(() => {
+      const now = Date.now()
+      setRevealed((prev) => {
+        const hasExpired = Object.values(prev).some((r) => r.exp <= now)
+        if (!hasExpired && Object.keys(prev).length === 0) return prev
+        const next = { ...prev }
+        for (const k of Object.keys(next)) {
+          if (next[k]!.exp <= now) delete next[k]
+        }
+        return next
+      })
+    }, 500) // 500ms for smoother countdown
+    return () => clearInterval(id)
+  }, [])
 
   async function checkStatus() {
     try {
@@ -114,21 +147,6 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
   }
 
   useEffect(() => { void checkStatus() }, [])
-
-  // Expire revealed values after 10s
-  useEffect(() => {
-    const id = setInterval(() => {
-      const now = Date.now()
-      setRevealed((prev) => {
-        const next = { ...prev }
-        for (const k of Object.keys(next)) {
-          if (next[k]!.exp < now) delete next[k]
-        }
-        return next
-      })
-    }, 1000)
-    return () => clearInterval(id)
-  }, [])
 
   async function handleInit(e: FormEvent) {
     e.preventDefault()
@@ -159,7 +177,6 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
         url: (fd.get('url') as string).trim() || undefined,
         username: (fd.get('username') as string).trim() || undefined,
         value: fd.get('value') as string,
-        logo_url: undefined,
         password: fd.get('password') as string,
       })
       setShowAdd(false)
@@ -172,13 +189,47 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
     }
   }
 
+  function openEdit(entry: Entry) {
+    setEditingId(entry.id)
+    setEditDraft({ title: entry.title, url: entry.url ?? '', username: entry.username ?? '', newPassword: '', vaultPassword: '' })
+    setEditError(null)
+  }
+
+  async function handleEditEntry(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    setEditError(null)
+    if (editDraft.newPassword && !editDraft.vaultPassword) {
+      setEditError('Vault password is required to change the secret value')
+      return
+    }
+    setEditSubmitting(true)
+    try {
+      const body: Record<string, unknown> = {
+        title: editDraft.title.trim(),
+        url: editDraft.url.trim() || null,
+        username: editDraft.username.trim() || null,
+      }
+      if (editDraft.newPassword) {
+        body.newValue = editDraft.newPassword
+        body.password = editDraft.vaultPassword
+      }
+      await api.patch(`/personal-vault/entries/${editingId}`, body)
+      setEditingId(null)
+      await loadEntries()
+    } catch (err) {
+      setEditError(err instanceof ApiError ? err.message : 'Failed to update entry')
+    } finally {
+      setEditSubmitting(false)
+    }
+  }
+
   async function handleReveal(entryId: string) {
     if (!revealPw) { setRevealError('Password required'); return }
     setRevealError(null)
     setRevealSubmitting(true)
     try {
       const data = await api.post<{ value: string }>(`/personal-vault/entries/${entryId}/reveal`, { password: revealPw })
-      setRevealed((prev) => ({ ...prev, [entryId]: { value: data.value, exp: Date.now() + 10000 } }))
+      setRevealed((prev) => ({ ...prev, [entryId]: { value: data.value, exp: Date.now() + REVEAL_SECONDS * 1000 } }))
       setRevealingId(null)
       setRevealPw('')
     } catch (err) {
@@ -188,12 +239,29 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
     }
   }
 
-  async function handleDelete(id: string, title: string) {
-    if (!confirm(`Delete "${title}"?`)) return
+  async function handleCopyEntry(entryId: string) {
+    const rev = revealed[entryId]
+    if (!rev || rev.exp <= Date.now()) return
+    try {
+      await navigator.clipboard.writeText(rev.value)
+      setCopiedEntryId(entryId)
+      setTimeout(() => setCopiedEntryId((prev) => prev === entryId ? null : prev), 1500)
+      if (clipClearRef.current) clearTimeout(clipClearRef.current)
+      clipClearRef.current = setTimeout(() => {
+        navigator.clipboard.writeText('').catch(() => {})
+      }, Math.max(0, rev.exp - Date.now()))
+    } catch {
+      // Clipboard API unavailable
+    }
+  }
+
+  async function handleDelete(id: string) {
+    setConfirmDelete(null)
     setDeletingId(id)
     try {
       await api.delete(`/personal-vault/entries/${id}`)
       setEntries((prev) => prev.filter((e) => e.id !== id))
+      if (editingId === id) setEditingId(null)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Delete failed')
     } finally {
@@ -211,9 +279,7 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
           </p>
         </div>
 
-        {loading && (
-          <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div>
-        )}
+        {loading && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div>}
 
         {error && (
           <div style={{ padding: '10px 14px', background: 'color-mix(in srgb, var(--danger) 10%, transparent)', border: '1px solid color-mix(in srgb, var(--danger) 30%, transparent)', borderRadius: 'var(--radius-sm)', color: 'var(--danger)', fontSize: 13, marginBottom: 16 }}>
@@ -223,16 +289,11 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
 
         {/* ── Not initialized ── */}
         {!loading && initialized === false && (
-          <div style={{
-            background: 'var(--bg-elev)', border: '1px solid var(--border)',
-            borderRadius: 'var(--radius)', padding: 24, maxWidth: 420,
-          }}>
+          <div style={{ background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 24, maxWidth: 420 }}>
             <p style={{ margin: '0 0 4px', fontSize: 14, fontWeight: 600, color: 'var(--text)' }}>Set up your personal vault</p>
             <p style={{ margin: '0 0 16px', fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
               Choose a vault password. This password encrypts your entries — it's separate from your login.
-              <strong style={{ color: 'var(--warning)', display: 'block', marginTop: 6 }}>
-                It cannot be recovered if lost.
-              </strong>
+              <strong style={{ color: 'var(--warning)', display: 'block', marginTop: 6 }}>It cannot be recovered if lost.</strong>
             </p>
             <form onSubmit={(e) => void handleInit(e)} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {initError && <p style={{ margin: 0, fontSize: 12, color: 'var(--danger)' }}>{initError}</p>}
@@ -254,7 +315,6 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
         {/* ── Initialized: entries list ── */}
         {!loading && initialized === true && (
           <>
-            {/* Add entry button */}
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 16 }}>
               <button
                 onClick={() => { setShowAdd((v) => !v); setAddError(null) }}
@@ -264,34 +324,26 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
               </button>
             </div>
 
-            {/* Add entry form */}
+            {/* ── Add form ── */}
             {showAdd && (
-              <form
-                onSubmit={(e) => void handleAddEntry(e)}
-                style={{ background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 16, marginBottom: 20, display: 'flex', flexDirection: 'column', gap: 10 }}
-              >
+              <form onSubmit={(e) => void handleAddEntry(e)} style={{ background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 16, marginBottom: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>New entry</p>
                 {addError && <p style={{ margin: 0, fontSize: 12, color: 'var(--danger)' }}>{addError}</p>}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                   <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    Title *
-                    <input name="title" required placeholder="e.g. GitHub" style={INPUT} />
+                    Title *<input name="title" required placeholder="e.g. GitHub" style={INPUT} />
                   </label>
                   <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    Username / email
-                    <input name="username" placeholder="you@example.com" style={INPUT} />
+                    Username / email<input name="username" placeholder="you@example.com" style={INPUT} />
                   </label>
                   <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    URL
-                    <input name="url" type="url" placeholder="https://github.com" style={INPUT} />
+                    URL<input name="url" type="url" placeholder="https://github.com" style={INPUT} />
                   </label>
                   <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    Password / secret *
-                    <input name="value" type="password" required placeholder="The value to store" style={INPUT} />
+                    Password / secret *<input name="value" type="password" required placeholder="The value to store" style={INPUT} />
                   </label>
                   <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4, gridColumn: '1 / -1' }}>
-                    Vault password (to encrypt)
-                    <input name="password" type="password" required placeholder="Your vault password" style={INPUT} />
+                    Vault password (to encrypt)<input name="password" type="password" required placeholder="Your vault password" style={INPUT} />
                   </label>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
@@ -303,7 +355,6 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
               </form>
             )}
 
-            {/* Entries */}
             {entries.length === 0 && (
               <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text-muted)', fontSize: 13 }}>
                 No entries yet. Add your first credential above.
@@ -314,14 +365,14 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
               {entries.map((entry) => {
                 const rev = revealed[entry.id]
                 const isRevealing = revealingId === entry.id
+                const isEditing = editingId === entry.id
+                const secsLeft = rev ? Math.ceil((rev.exp - Date.now()) / 1000) : 0
+                const countdownColor = secsLeft <= 3 ? 'var(--danger)' : secsLeft <= 6 ? 'var(--warning)' : 'var(--success)'
+
                 return (
                   <div
                     key={entry.id}
-                    style={{
-                      background: 'var(--bg-elev)', border: '1px solid var(--border)',
-                      borderRadius: 'var(--radius)', padding: '12px 16px',
-                      display: 'flex', flexDirection: 'column', gap: 8,
-                    }}
+                    style={{ background: 'var(--bg-elev)', border: `1px solid ${isEditing ? 'var(--accent)' : 'var(--border)'}`, borderRadius: 'var(--radius)', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}
                   >
                     {/* Entry header */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -331,33 +382,60 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
                           {entry.title}
                         </div>
                         {entry.username && (
-                          <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                            {entry.username}
-                          </div>
+                          <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{entry.username}</div>
                         )}
                         {entry.url && (
-                          <a
-                            href={entry.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            style={{ fontSize: 11, color: 'var(--accent)', textDecoration: 'none', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                          >
+                          <a href={entry.url} target="_blank" rel="noreferrer"
+                            style={{ fontSize: 11, color: 'var(--accent)', textDecoration: 'none', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             {entry.url}
                           </a>
                         )}
                       </div>
 
-                      {/* Actions */}
-                      <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                      {/* Actions row */}
+                      <div style={{ display: 'flex', gap: 6, flexShrink: 0, alignItems: 'center' }}>
                         {rev ? (
-                          <span style={{
-                            fontFamily: 'var(--font-mono)', fontSize: 12,
-                            background: 'var(--bg-elev-2)', border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius-sm)', padding: '4px 8px',
-                            color: 'var(--success)', userSelect: 'all',
-                          }}>
-                            {rev.value}
-                          </span>
+                          <>
+                            {/* Countdown badge */}
+                            <span style={{
+                              fontSize: 11, fontWeight: 700, fontFamily: 'var(--font-mono)',
+                              color: countdownColor,
+                              background: `color-mix(in srgb, ${countdownColor} 12%, transparent)`,
+                              border: `1px solid color-mix(in srgb, ${countdownColor} 30%, transparent)`,
+                              borderRadius: 'var(--radius-sm)', padding: '2px 6px',
+                              minWidth: 28, textAlign: 'center',
+                            }}>
+                              {secsLeft}s
+                            </span>
+                            {/* Value */}
+                            <span style={{
+                              fontFamily: 'var(--font-mono)', fontSize: 12,
+                              background: 'var(--bg-elev-2)', border: '1px solid var(--border)',
+                              borderRadius: 'var(--radius-sm)', padding: '4px 8px',
+                              color: 'var(--success)', userSelect: 'all',
+                            }}>
+                              {rev.value}
+                            </span>
+                            {/* Copy icon */}
+                            <button
+                              onClick={() => void handleCopyEntry(entry.id)}
+                              title={copiedEntryId === entry.id ? 'Copied!' : 'Copy to clipboard'}
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                width: 28, height: 28, padding: 0,
+                                background: copiedEntryId === entry.id ? 'color-mix(in srgb, var(--success) 15%, transparent)' : 'var(--bg-elev-2)',
+                                border: `1px solid ${copiedEntryId === entry.id ? 'color-mix(in srgb, var(--success) 40%, transparent)' : 'var(--border)'}`,
+                                borderRadius: 'var(--radius-sm)',
+                                color: copiedEntryId === entry.id ? 'var(--success)' : 'var(--text-muted)',
+                                cursor: 'pointer', flexShrink: 0, transition: 'all 0.15s',
+                              }}
+                            >
+                              {copiedEntryId === entry.id
+                                ? <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>
+                                : <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/><path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5h-.5A1.5 1.5 0 0 0 3 3v.5h10V3a1.5 1.5 0 0 0-1.5-1.5H11A1.5 1.5 0 0 0 9.5 0h-3z"/></svg>
+                              }
+                            </button>
+                          </>
                         ) : (
                           <button
                             onClick={() => {
@@ -371,7 +449,13 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
                           </button>
                         )}
                         <button
-                          onClick={() => void handleDelete(entry.id, entry.title)}
+                          onClick={() => { isEditing ? setEditingId(null) : openEdit(entry) }}
+                          style={{ height: 28, padding: '0 8px', background: isEditing ? 'var(--accent-soft)' : 'none', border: isEditing ? '1px solid var(--accent)' : 'none', color: isEditing ? 'var(--accent)' : 'var(--text-muted)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', borderRadius: 'var(--radius-sm)' }}
+                        >
+                          {isEditing ? 'Cancel' : 'Edit'}
+                        </button>
+                        <button
+                          onClick={() => setConfirmDelete({ id: entry.id, title: entry.title })}
                           disabled={deletingId === entry.id}
                           style={{ height: 28, padding: '0 8px', background: 'none', border: 'none', color: 'var(--danger)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}
                         >
@@ -380,9 +464,9 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
                       </div>
                     </div>
 
-                    {/* Inline reveal password prompt */}
+                    {/* Reveal password prompt */}
                     {isRevealing && !rev && (
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', paddingTop: 4, borderTop: '1px solid var(--border)' }}>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', paddingTop: 8, borderTop: '1px solid var(--border)' }}>
                         <input
                           type="password"
                           value={revealPw}
@@ -392,17 +476,50 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
                           autoFocus
                           style={{ ...INPUT, flex: 1 }}
                         />
-                        <button
-                          onClick={() => void handleReveal(entry.id)}
-                          disabled={revealSubmitting}
-                          style={{ ...BTN_PRIMARY, opacity: revealSubmitting ? 0.6 : 1, whiteSpace: 'nowrap' }}
-                        >
+                        <button onClick={() => void handleReveal(entry.id)} disabled={revealSubmitting}
+                          style={{ ...BTN_PRIMARY, opacity: revealSubmitting ? 0.6 : 1, whiteSpace: 'nowrap' }}>
                           {revealSubmitting ? '…' : 'Show'}
                         </button>
-                        {revealError && (
-                          <span style={{ fontSize: 12, color: 'var(--danger)' }}>{revealError}</span>
-                        )}
+                        {revealError && <span style={{ fontSize: 12, color: 'var(--danger)' }}>{revealError}</span>}
                       </div>
+                    )}
+
+                    {/* Edit form */}
+                    {isEditing && (
+                      <form onSubmit={(e) => void handleEditEntry(e)} style={{ paddingTop: 8, borderTop: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        <p style={{ margin: 0, fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>Edit entry</p>
+                        {editError && <p style={{ margin: 0, fontSize: 12, color: 'var(--danger)' }}>{editError}</p>}
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                          <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            Title *
+                            <input required value={editDraft.title} onChange={(e) => setEditDraft((p) => ({ ...p, title: e.target.value }))} style={INPUT} />
+                          </label>
+                          <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            Username / email
+                            <input value={editDraft.username} onChange={(e) => setEditDraft((p) => ({ ...p, username: e.target.value }))} placeholder="you@example.com" style={INPUT} />
+                          </label>
+                          <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4, gridColumn: '1 / -1' }}>
+                            URL
+                            <input type="url" value={editDraft.url} onChange={(e) => setEditDraft((p) => ({ ...p, url: e.target.value }))} placeholder="https://example.com" style={INPUT} />
+                          </label>
+                          <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            New password / secret
+                            <input type="password" value={editDraft.newPassword} onChange={(e) => setEditDraft((p) => ({ ...p, newPassword: e.target.value }))} placeholder="Leave blank to keep current" style={INPUT} />
+                          </label>
+                          {editDraft.newPassword && (
+                            <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                              Vault password (to re-encrypt)
+                              <input type="password" value={editDraft.vaultPassword} onChange={(e) => setEditDraft((p) => ({ ...p, vaultPassword: e.target.value }))} placeholder="Your vault password" style={INPUT} autoFocus />
+                            </label>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                          <button type="button" onClick={() => setEditingId(null)} style={BTN_GHOST}>Cancel</button>
+                          <button type="submit" disabled={editSubmitting} style={{ ...BTN_PRIMARY, opacity: editSubmitting ? 0.6 : 1 }}>
+                            {editSubmitting ? 'Saving…' : 'Save changes'}
+                          </button>
+                        </div>
+                      </form>
                     )}
                   </div>
                 )
@@ -411,6 +528,15 @@ export function PersonalPage({ user, appTitle, onNavigate, onLogout }: Props) {
           </>
         )}
       </div>
+      {confirmDelete && (
+        <ConfirmDialog
+          title="Delete entry"
+          message={`Delete "${confirmDelete.title}"? This cannot be undone.`}
+          confirmLabel="Delete"
+          onConfirm={() => void handleDelete(confirmDelete.id)}
+          onCancel={() => setConfirmDelete(null)}
+        />
+      )}
     </AppShell>
   )
 }

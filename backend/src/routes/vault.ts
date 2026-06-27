@@ -167,6 +167,30 @@ export function vaultRouter(pool: Pool): Router {
     },
   )
 
+  // ── User lookup for member picker ────────────────────────────────────────
+  // Accessible to anyone who can manage vault access (no users.manage required)
+
+  router.get(
+    '/vault/users',
+    requireAuth,
+    requirePermission('vault.manage_access'),
+    async (req, res, next) => {
+      try {
+        const q = typeof req.query['q'] === 'string' ? req.query['q'].trim() : ''
+        const { rows } = await pool.query<{ id: string; display_name: string; email: string }>(
+          `SELECT id, display_name, email
+           FROM users
+           WHERE deleted_at IS NULL AND status = 'active'
+           ${q ? `AND (LOWER(display_name) LIKE $1 OR LOWER(email) LIKE $1)` : ''}
+           ORDER BY display_name
+           LIMIT 50`,
+          q ? [`%${q.toLowerCase()}%`] : [],
+        )
+        res.json({ users: rows.map((u) => ({ id: u.id, displayName: u.display_name, email: u.email })) })
+      } catch (err) { next(err) }
+    },
+  )
+
   // ── Vault members ────────────────────────────────────────────────────────
 
   router.post(
@@ -226,8 +250,12 @@ export function vaultRouter(pool: Pool): Router {
           return void res.status(403).json({ error: 'Forbidden' })
         }
         const { rows } = await pool.query(
-          `SELECT ${SECRET_META_COLS}
+          `SELECT ${SECRET_META_COLS},
+                  srv.hostname AS server_hostname,
+                  a.name       AS app_name
            FROM secrets s
+           LEFT JOIN servers srv ON srv.id = s.server_id AND srv.deleted_at IS NULL
+           LEFT JOIN apps    a   ON a.id   = s.app_id   AND a.deleted_at   IS NULL
            WHERE s.vault_id = $1 AND s.deleted_at IS NULL
            ORDER BY s.title`,
           [req.params['id']],
@@ -379,6 +407,7 @@ export function vaultRouter(pool: Pool): Router {
 
         const {
           title,
+          type: typeField,
           username,
           hostUrl,
           logoUrl,
@@ -387,17 +416,20 @@ export function vaultRouter(pool: Pool): Router {
           rotationPeriodDays,
           expiresAt,
           serverId,
+          appId,
           reason,
         } = req.body as {
           title?: string
-          username?: string
-          hostUrl?: string
-          logoUrl?: string
-          notes?: string
+          type?: string
+          username?: string | null
+          hostUrl?: string | null
+          logoUrl?: string | null
+          notes?: string | null
           newValue?: string
-          rotationPeriodDays?: number
-          expiresAt?: string
+          rotationPeriodDays?: number | null
+          expiresAt?: string | null
           serverId?: string | null
+          appId?: string | null
           reason?: string
         }
 
@@ -421,52 +453,54 @@ export function vaultRouter(pool: Pool): Router {
 
           const kek = getConfig().kek
           const payload = encryptSecret(newValue, kek, 'v1')
-
-          const serverIdForUpdate = typeof serverId === 'string' && serverId.length > 0 ? serverId : null
-          const serverIdSet = serverIdForUpdate !== null ? `, server_id = $14::uuid` : ''
-          const rotateParams: unknown[] = [
-            req.params['id'],
-            payload.ciphertext, payload.iv, payload.authTag, payload.wrappedDek, payload.keyVersion,
-            title ?? null, username ?? null, hostUrl ?? null, logoUrl ?? null,
-            notes ?? null, rotationPeriodDays ?? null, expiresAt ?? null,
-          ]
-          if (serverIdForUpdate !== null) rotateParams.push(serverIdForUpdate)
           await pool.query(
             `UPDATE secrets SET
                ciphertext = $2, iv = $3, auth_tag = $4, wrapped_dek = $5, key_version = $6,
                last_changed_at = now(), updated_at = now(),
-               title = COALESCE($7, title),
-               username = COALESCE($8, username),
-               host_url = COALESCE($9, host_url),
+               title    = COALESCE($7,  title),
+               username = COALESCE($8,  username),
+               host_url = COALESCE($9,  host_url),
                logo_url = COALESCE($10, logo_url),
-               notes = COALESCE($11, notes),
+               notes    = COALESCE($11, notes),
                rotation_period_days = COALESCE($12, rotation_period_days),
-               expires_at = COALESCE($13, expires_at)${serverIdSet}
+               expires_at = COALESCE($13, expires_at),
+               server_id  = COALESCE($14::uuid, server_id),
+               app_id     = COALESCE($15::uuid, app_id)
              WHERE id = $1`,
-            rotateParams,
+            [
+              req.params['id'],
+              payload.ciphertext, payload.iv, payload.authTag, payload.wrappedDek, payload.keyVersion,
+              title ?? null, username ?? null, hostUrl ?? null, logoUrl ?? null,
+              notes ?? null, rotationPeriodDays ?? null, expiresAt ?? null,
+              (serverId || null), (appId || null),
+            ],
           )
         } else {
-          const serverIdForUpdate = typeof serverId === 'string' && serverId.length > 0 ? serverId : null
-          const serverIdSet = serverIdForUpdate !== null ? `, server_id = $9::uuid` : ''
-          const metaParams: unknown[] = [
-            req.params['id'],
-            title ?? null, username ?? null, hostUrl ?? null, logoUrl ?? null,
-            notes ?? null, rotationPeriodDays ?? null, expiresAt ?? null,
-          ]
-          if (serverIdForUpdate !== null) metaParams.push(serverIdForUpdate)
-          await pool.query(
-            `UPDATE secrets SET
-               updated_at = now(),
-               title = COALESCE($2, title),
-               username = COALESCE($3, username),
-               host_url = COALESCE($4, host_url),
-               logo_url = COALESCE($5, logo_url),
-               notes = COALESCE($6, notes),
-               rotation_period_days = COALESCE($7, rotation_period_days),
-               expires_at = COALESCE($8, expires_at)${serverIdSet}
-             WHERE id = $1`,
-            metaParams,
-          )
+          // Meta-only update — dynamic builder so we can explicitly clear nullable fields
+          const body = req.body as Record<string, unknown>
+          const updates: string[] = ['updated_at = now()']
+          const params: unknown[] = [req.params['id']]
+          let idx = 2
+
+          const setField = (col: string, val: unknown, cast?: string) => {
+            updates.push(`${col} = $${idx++}${cast ? `::${cast}` : ''}`)
+            params.push(val)
+          }
+
+          if (title)                                  setField('title', title)
+          if (typeField)                              setField('type', typeField)
+          if ('username' in body)                     setField('username', username || null)
+          if ('hostUrl' in body)                      setField('host_url', hostUrl || null)
+          if ('logoUrl' in body)                      setField('logo_url', logoUrl || null)
+          if ('notes' in body)                        setField('notes', notes || null)
+          if ('rotationPeriodDays' in body)           setField('rotation_period_days', rotationPeriodDays ?? null)
+          if ('expiresAt' in body)                    setField('expires_at', expiresAt || null)
+          if ('serverId' in body)                     setField('server_id', serverId || null, 'uuid')
+          if ('appId' in body)                        setField('app_id', appId || null, 'uuid')
+
+          if (updates.length > 1) {
+            await pool.query(`UPDATE secrets SET ${updates.join(', ')} WHERE id = $1`, params)
+          }
         }
 
         const { rows } = await pool.query(

@@ -1,20 +1,21 @@
 import { ThemeToggle } from './ThemeToggle.tsx'
 import { api } from '../lib/api.ts'
 
-const NAV_ITEMS = [
-  { label: 'Dashboard', href: '/' },
-  { label: 'Servers', href: '/servers' },
-  { label: 'Apps', href: '/apps' },
-  { label: 'Topology', href: '/topology' },
-  { label: 'Scripts', href: '/scripts' },
-  { label: 'Vault', href: '/vault' },
-  { label: 'Personal', href: '/personal' },
-  { label: 'Documents', href: '/documents' },
+// permission: undefined = visible to all authenticated users
+const NAV_ITEMS: { label: string; href: string; permission?: string | string[] }[] = [
+  { label: 'Dashboard',     href: '/' },
+  { label: 'Servers',       href: '/servers',       permission: 'infra.read' },
+  { label: 'Apps',          href: '/apps',           permission: 'infra.read' },
+  { label: 'Topology',      href: '/topology',       permission: 'infra.read' },
+  { label: 'Scripts',       href: '/scripts',        permission: 'infra.read' },
+  { label: 'Vault',         href: '/vault',          permission: 'secrets.view' },
+  { label: 'Personal',      href: '/personal' },
+  { label: 'Documents',     href: '/documents',      permission: 'docs.read' },
   { label: 'Notifications', href: '/notifications' },
-  { label: 'Audit', href: '/audit' },
-  { label: 'Recycle Bin', href: '/recycle-bin' },
-  { label: 'Backup', href: '/backup' },
-  { label: 'Settings', href: '/settings' },
+  { label: 'Audit',         href: '/audit',          permission: 'audit.read' },
+  { label: 'Recycle Bin',   href: '/recycle-bin',    permission: ['servers.write', 'docs.write', 'users.manage'] },
+  { label: 'Backup',        href: '/backup',         permission: 'users.manage' },
+  { label: 'Settings',      href: '/settings',       permission: 'users.manage' },
 ]
 
 interface AppShellProps {
@@ -22,7 +23,7 @@ interface AppShellProps {
   title?: string
   currentPath?: string
   onNavigate?: (path: string) => void
-  user?: { displayName: string; email: string }
+  user?: { displayName: string; email: string; permissions?: string[] }
   onLogout?: () => void
 }
 
@@ -34,8 +35,14 @@ export function AppShell({
   user,
   onLogout,
 }: AppShellProps) {
-  // Fall back to window.location.pathname if no currentPath prop
   const activePath = currentPath ?? window.location.pathname
+  const userPerms = user?.permissions ?? []
+
+  function canSee(item: typeof NAV_ITEMS[number]) {
+    if (!item.permission) return true
+    const perms = Array.isArray(item.permission) ? item.permission : [item.permission]
+    return perms.some((p) => userPerms.includes(p))
+  }
 
   function handleLogout() {
     api.post('/auth/logout', {}).then(() => {
@@ -61,16 +68,25 @@ export function AppShell({
           gap: 16,
         }}
       >
-        <span
-          style={{
-            fontWeight: 600,
-            fontSize: 14,
-            color: 'var(--text)',
-            letterSpacing: '-0.01em',
-          }}
-        >
-          {title}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <img
+            src="/favicon.svg"
+            alt=""
+            width={22}
+            height={22}
+            style={{ flexShrink: 0 }}
+          />
+          <span
+            style={{
+              fontWeight: 600,
+              fontSize: 14,
+              color: 'var(--text)',
+              letterSpacing: '-0.01em',
+            }}
+          >
+            {title}
+          </span>
+        </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {user && (
@@ -144,7 +160,7 @@ export function AppShell({
             overflowY: 'auto',
           }}
         >
-          {NAV_ITEMS.map((item) => {
+          {NAV_ITEMS.filter(canSee).map((item) => {
             const active = activePath === item.href
             return (
               <a

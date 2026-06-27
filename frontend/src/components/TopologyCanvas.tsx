@@ -17,6 +17,13 @@ import '@xyflow/react/dist/style.css'
 
 // ── Type definitions ──────────────────────────────────────────────────────────
 
+export interface PortInfo {
+  number: number
+  protocol: string
+  appLabel: string | null
+  exposure: string
+}
+
 export interface TopologyNode {
   id: string
   type: 'server' | 'app_instance'
@@ -27,6 +34,7 @@ export interface TopologyNode {
     serverId?: string
     serverHostname?: string
     instanceId?: string
+    ports?: PortInfo[]
   }
 }
 
@@ -51,9 +59,16 @@ interface TopologyCanvasProps {
 
 // ── Dagre layout ──────────────────────────────────────────────────────────────
 
-const NODE_WIDTH = 180
-const SERVER_NODE_HEIGHT = 72
+const NODE_WIDTH = 190
 const INSTANCE_NODE_HEIGHT = 60
+const PORT_BADGE_HEIGHT = 20
+const MAX_INLINE_PORTS = 3
+
+function serverNodeHeight(portCount: number): number {
+  const inline = Math.min(portCount, MAX_INLINE_PORTS)
+  const hasOverflow = portCount > MAX_INLINE_PORTS
+  return 68 + inline * PORT_BADGE_HEIGHT + (hasOverflow ? PORT_BADGE_HEIGHT : 0) + (portCount > 0 ? 8 : 0)
+}
 
 function applyDagreLayout(
   nodes: TopologyNode[],
@@ -64,7 +79,9 @@ function applyDagreLayout(
   g.setGraph({ rankdir: 'LR', nodesep: 40, ranksep: 80 })
 
   for (const node of nodes) {
-    const h = node.type === 'server' ? SERVER_NODE_HEIGHT : INSTANCE_NODE_HEIGHT
+    const h = node.type === 'server'
+      ? serverNodeHeight(node.data.ports?.length ?? 0)
+      : INSTANCE_NODE_HEIGHT
     g.setNode(node.id, { width: NODE_WIDTH, height: h })
   }
   for (const edge of edges) {
@@ -75,7 +92,9 @@ function applyDagreLayout(
 
   return nodes.map((node) => {
     const n = g.node(node.id)
-    const h = node.type === 'server' ? SERVER_NODE_HEIGHT : INSTANCE_NODE_HEIGHT
+    const h = node.type === 'server'
+      ? serverNodeHeight(node.data.ports?.length ?? 0)
+      : INSTANCE_NODE_HEIGHT
     return {
       id: node.id,
       position: { x: n.x - NODE_WIDTH / 2, y: n.y - h / 2 },
@@ -87,10 +106,14 @@ function applyDagreLayout(
 
 // ── Custom node: ServerNode ───────────────────────────────────────────────────
 
-function ServerNode({ data, id, selected }: NodeProps & { data: TopologyNode['data'] }) {
+function ServerNode({ data, selected }: NodeProps & { data: TopologyNode['data'] }) {
   const isHighlighted = (data as { _highlighted?: boolean })._highlighted
   const env = data.environment ?? ''
   const status = data.status ?? ''
+  const ports = data.ports ?? []
+  const visiblePorts = ports.slice(0, MAX_INLINE_PORTS)
+  const overflowCount = ports.length - MAX_INLINE_PORTS
+  const nodeH = serverNodeHeight(ports.length)
 
   const envColor =
     env === 'prod' ? 'var(--danger)' :
@@ -114,13 +137,13 @@ function ServerNode({ data, id, selected }: NodeProps & { data: TopologyNode['da
           : 'var(--bg-elev)',
         border: `1px solid ${isHighlighted || selected ? 'var(--accent-strong)' : 'var(--border)'}`,
         borderRadius: 'var(--radius)',
-        padding: '8px 12px',
+        padding: '8px 10px 6px',
         width: NODE_WIDTH,
-        height: SERVER_NODE_HEIGHT,
+        height: nodeH,
         boxSizing: 'border-box',
         display: 'flex',
         flexDirection: 'column',
-        gap: 4,
+        gap: 3,
         boxShadow: isHighlighted || selected
           ? '0 0 0 2px var(--accent-soft)'
           : '0 1px 3px rgba(0,0,0,0.15)',
@@ -128,51 +151,43 @@ function ServerNode({ data, id, selected }: NodeProps & { data: TopologyNode['da
     >
       <Handle type="target" position={Position.Left} style={{ background: 'var(--border)' }} />
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
-        <span
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: 'var(--text)',
-            fontFamily: 'var(--font-mono)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            flex: 1,
-          }}
-        >
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
           {data.label}
         </span>
-        <span
-          style={{
-            display: 'inline-block',
-            padding: '1px 5px',
-            borderRadius: 3,
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: '0.05em',
-            textTransform: 'uppercase',
-            color: envColor,
-            background: `color-mix(in srgb, ${envColor} 12%, transparent)`,
-            border: `1px solid color-mix(in srgb, ${envColor} 25%, transparent)`,
-            flexShrink: 0,
-          }}
-        >
+        <span style={{ display: 'inline-block', padding: '1px 5px', borderRadius: 3, fontSize: 10, fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', color: envColor, background: `color-mix(in srgb, ${envColor} 12%, transparent)`, border: `1px solid color-mix(in srgb, ${envColor} 25%, transparent)`, flexShrink: 0 }}>
           {env}
         </span>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-        <span
-          aria-hidden
-          style={{
-            width: 6,
-            height: 6,
-            borderRadius: '50%',
-            background: statusColor,
-            flexShrink: 0,
-          }}
-        />
+        <span aria-hidden style={{ width: 6, height: 6, borderRadius: '50%', background: statusColor, flexShrink: 0 }} />
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{status}</span>
       </div>
+
+      {/* Port badges */}
+      {ports.length > 0 && (
+        <div style={{ marginTop: 4, borderTop: '1px solid var(--border)', paddingTop: 4, display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {visiblePorts.map((p) => {
+            const expColor = p.exposure === 'external' ? 'var(--danger)' : p.exposure === 'vpn' ? 'var(--warning)' : 'var(--text-subtle)'
+            return (
+              <div key={p.number} style={{ display: 'flex', alignItems: 'center', gap: 4, height: PORT_BADGE_HEIGHT - 2 }}>
+                {/* Pipe nub */}
+                <div style={{ width: 6, height: 1, background: 'var(--border)', flexShrink: 0 }} />
+                <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--accent)', flexShrink: 0 }}>:{p.number}</span>
+                <span style={{ width: 3, height: 3, borderRadius: '50%', background: expColor, flexShrink: 0 }} />
+                <span style={{ fontSize: 10, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {p.appLabel ?? p.protocol}
+                </span>
+              </div>
+            )
+          })}
+          {overflowCount > 0 && (
+            <div style={{ fontSize: 10, color: 'var(--text-subtle)', height: PORT_BADGE_HEIGHT - 2, display: 'flex', alignItems: 'center', paddingLeft: 10 }}>
+              +{overflowCount} more — click for all
+            </div>
+          )}
+        </div>
+      )}
+
       <Handle type="source" position={Position.Right} style={{ background: 'var(--border)' }} />
     </div>
   )

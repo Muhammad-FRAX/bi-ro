@@ -19,6 +19,29 @@ function isValidStatus(v: unknown): v is Status {
 export function serversRouter(pool: Pool): Router {
   const router = Router()
 
+  // ── Dashboard stats ───────────────────────────────────────────────────────
+
+  router.get('/stats', requireAuth, async (_req, res, next) => {
+    try {
+      const { rows } = await pool.query<{ entity: string; cnt: string }>(`
+        SELECT 'servers'   AS entity, COUNT(*)::text AS cnt FROM servers   WHERE deleted_at IS NULL
+        UNION ALL
+        SELECT 'secrets',            COUNT(*)::text        FROM secrets    WHERE deleted_at IS NULL
+        UNION ALL
+        SELECT 'documents',          COUNT(*)::text        FROM documents  WHERE deleted_at IS NULL
+        UNION ALL
+        SELECT 'apps',               COUNT(*)::text        FROM apps       WHERE deleted_at IS NULL
+      `)
+      const map = Object.fromEntries(rows.map((r) => [r.entity, parseInt(r.cnt, 10)]))
+      res.json({
+        servers:   map['servers']   ?? 0,
+        secrets:   map['secrets']   ?? 0,
+        documents: map['documents'] ?? 0,
+        apps:      map['apps']      ?? 0,
+      })
+    } catch (err) { next(err) }
+  })
+
   // ── Tags ──────────────────────────────────────────────────────────────────
 
   router.get('/tags', requireAuth, requirePermission('infra.read'), async (_req, res, next) => {

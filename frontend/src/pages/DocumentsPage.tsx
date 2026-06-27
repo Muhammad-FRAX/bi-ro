@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, type FormEvent, type CSSProperties } from 
 import { AppShell } from '../components/AppShell.tsx'
 import { Button } from '../components/ui/Button.tsx'
 import { DataTable } from '../components/DataTable.tsx'
+import { ConfirmDialog } from '../components/ConfirmDialog.tsx'
 import { api, ApiError } from '../lib/api.ts'
 
 interface Document {
@@ -185,6 +186,7 @@ export function DocumentsPage({ user, appTitle, onNavigate, onLogout }: Props) {
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [viewingDoc, setViewingDoc] = useState<Document | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; filename: string } | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const canWrite = user.permissions.includes('docs.write')
@@ -231,13 +233,14 @@ export function DocumentsPage({ user, appTitle, onNavigate, onLogout }: Props) {
     }
   }
 
-  async function handleDelete(id: string, filename: string) {
-    if (!confirm(`Delete "${filename}"?`)) return
+  async function handleDelete(id: string) {
     try {
       await api.delete(`/documents/${id}`)
+      setConfirmDelete(null)
       await load()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Delete failed')
+      setConfirmDelete(null)
     }
   }
 
@@ -294,7 +297,7 @@ export function DocumentsPage({ user, appTitle, onNavigate, onLogout }: Props) {
       header: '',
       render: (doc: Document) => (
         <button
-          onClick={() => void handleDelete(doc.id, doc.filename)}
+          onClick={() => setConfirmDelete({ id: doc.id, filename: doc.filename })}
           style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer', fontSize: 12, padding: '2px 6px' }}
         >
           Delete
@@ -370,6 +373,15 @@ export function DocumentsPage({ user, appTitle, onNavigate, onLogout }: Props) {
         {/* Inline viewer */}
         {viewingDoc && (
           <DocumentViewer doc={viewingDoc} onClose={() => setViewingDoc(null)} />
+        )}
+        {confirmDelete && (
+          <ConfirmDialog
+            title="Delete document"
+            message={`Delete "${confirmDelete.filename}"? This cannot be undone.`}
+            confirmLabel="Delete"
+            onConfirm={() => void handleDelete(confirmDelete.id)}
+            onCancel={() => setConfirmDelete(null)}
+          />
         )}
       </div>
     </AppShell>

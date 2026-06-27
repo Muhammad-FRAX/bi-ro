@@ -136,6 +136,33 @@ export function appsRouter(pool: Pool): Router {
     } catch (err) { next(err) }
   })
 
+  router.get('/apps/:id/instances', requireAuth, requirePermission('infra.read'), async (req, res, next) => {
+    try {
+      const { rows } = await pool.query<{
+        id: string; server_id: string; hostname: string; environment: string
+        version: string | null; notes: string | null; created_at: string
+      }>(
+        `SELECT ai.id, ai.server_id, s.hostname, s.environment, ai.version, ai.notes, ai.created_at
+         FROM app_instances ai
+         JOIN servers s ON s.id = ai.server_id
+         WHERE ai.app_id = $1 AND ai.deleted_at IS NULL AND s.deleted_at IS NULL
+         ORDER BY s.hostname`,
+        [req.params['id']],
+      )
+      res.json({
+        instances: rows.map((r) => ({
+          id: r.id,
+          serverId: r.server_id,
+          hostname: r.hostname,
+          environment: r.environment,
+          version: r.version,
+          notes: r.notes,
+          createdAt: r.created_at,
+        })),
+      })
+    } catch (err) { next(err) }
+  })
+
   router.delete('/apps/:id', requireAuth, requirePermission('servers.write'), async (req, res, next) => {
     try {
       const { rowCount } = await pool.query(

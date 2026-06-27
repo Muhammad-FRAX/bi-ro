@@ -45,13 +45,18 @@ function DaysRemainingBadge({ days }: { days: number | null }) {
   )
 }
 
+interface Stats { servers: number; secrets: number; documents: number; apps: number }
+
 export function DashboardPage({ user, appTitle, onNavigate, onLogout }: DashboardPageProps) {
   const [expiringItems, setExpiringItems] = useState<ExpiringItem[]>([])
   const [expiryLoading, setExpiryLoading] = useState(true)
   const [expiryError, setExpiryError] = useState<string | null>(null)
   const [unreadCount, setUnreadCount] = useState(0)
+  const [stats, setStats] = useState<Stats>({ servers: 0, secrets: 0, documents: 0, apps: 0 })
 
   useEffect(() => {
+    api.get<Stats>('/stats').then((d) => setStats(d)).catch(() => {})
+
     const canViewSecrets = user.permissions.includes('secrets.view') || user.permissions.includes('users.manage')
     if (!canViewSecrets) {
       setExpiryLoading(false)
@@ -228,10 +233,10 @@ export function DashboardPage({ user, appTitle, onNavigate, onLogout }: Dashboar
             }}
           >
             {[
-              { label: 'Servers', count: 0, href: '/servers' },
-              { label: 'Secrets', count: 0, href: '/vault' },
-              { label: 'Scripts', count: 0, href: '/scripts' },
-              { label: 'Documents', count: 0, href: '/documents' },
+              { label: 'Servers',   count: stats.servers,   href: '/servers' },
+              { label: 'Apps',      count: stats.apps,      href: '/apps' },
+              { label: 'Secrets',   count: stats.secrets,   href: '/vault' },
+              { label: 'Documents', count: stats.documents, href: '/documents' },
             ].map((item) => (
               <div
                 key={item.label}

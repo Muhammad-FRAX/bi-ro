@@ -192,13 +192,7 @@ export function ServersPage({ user, appTitle, onNavigate, onLogout }: ServersPag
       key: 'hostname',
       header: 'Hostname',
       render: (s: Server) => (
-        <span
-          style={{ color: 'var(--accent)', cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 13 }}
-          onClick={() => onNavigate?.(`/servers/${s.id}`)}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => { if (e.key === 'Enter') onNavigate?.(`/servers/${s.id}`) }}
-        >
+        <span style={{ color: 'var(--accent)', fontFamily: 'var(--font-mono)', fontSize: 13 }}>
           {s.hostname}
         </span>
       ),
@@ -382,6 +376,7 @@ export function ServersPage({ user, appTitle, onNavigate, onLogout }: ServersPag
           rows={servers}
           keyField="id"
           loading={loading}
+          onRowClick={(s) => onNavigate?.(`/servers/${s.id}`)}
           emptyMessage={
             <div style={{ textAlign: 'center', padding: '40px 0' }}>
               <p style={{ margin: '0 0 4px', fontSize: 14, fontWeight: 500, color: 'var(--text)' }}>
