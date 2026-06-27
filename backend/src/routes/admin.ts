@@ -427,18 +427,34 @@ export function adminRouter(pool: Pool): Router {
       const offset = parseInt(String(req.query['offset'] ?? '0'), 10)
       const action = req.query['action'] ? String(req.query['action']) : null
       const actorId = req.query['actorId'] ? String(req.query['actorId']) : null
+      const result = req.query['result'] ? String(req.query['result']) : null
+      const dateFrom = req.query['dateFrom'] ? String(req.query['dateFrom']) : null
+      const dateTo = req.query['dateTo'] ? String(req.query['dateTo']) : null
 
       const conditions: string[] = []
       const params: unknown[] = []
       let idx = 1
 
       if (action) {
-        conditions.push(`action = $${idx++}`)
+        conditions.push(`al.action = $${idx++}`)
         params.push(action)
       }
       if (actorId) {
-        conditions.push(`actor_id = $${idx++}`)
+        conditions.push(`al.actor_id = $${idx++}`)
         params.push(actorId)
+      }
+      if (result) {
+        conditions.push(`al.result = $${idx++}`)
+        params.push(result)
+      }
+      if (dateFrom) {
+        conditions.push(`al.ts >= $${idx++}`)
+        params.push(dateFrom)
+      }
+      if (dateTo) {
+        // Include the full end day by adding 1 day
+        conditions.push(`al.ts < ($${idx++}::date + INTERVAL '1 day')`)
+        params.push(dateTo)
       }
 
       params.push(limit, offset)
