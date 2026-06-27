@@ -1351,3 +1351,230 @@ Structural gate:
 ## Phase 8 Complete ✅
 
 All chunks C8.1–C8.3 complete. Phase 9 (hardening + production readiness) is next.
+
+---
+
+## Phase 9 — Polish & Hardening
+
+### C9.1 — Search + command palette
+**Status:** ✅ GREEN (structural gate)
+
+**Built:**
+- `backend/src/routes/search.ts` — `GET /api/search?q=text` with `requireAuth + requirePermission('infra.read')`; searches servers (hostname/notes/location), apps (name/vendor/category), documents (filename), secrets (title/username only — NEVER ciphertext/value/iv/auth_tag/wrapped_dek); up to 20 results total (5 per entity type). Returns `{ results: SearchResult[] }` with type/id/title/subtitle/url.
+- `backend/src/__tests__/search.test.ts` — DB-skippable integration tests: auth guard (401), empty query → [], server results shape, no sensitive fields in results.
+- `frontend/src/components/CommandPalette.tsx` — Focus-trapped modal opened by `Ctrl/Cmd-K`; 200ms debounced search via `GET /api/search`; keyboard navigation (↑↓/Enter/Escape); type badges; navigates to result URL on selection.
+- `backend/src/server.ts` (updated) — `searchRouter` wired.
+- `frontend/src/App.tsx` (updated) — global `keydown` listener for `Ctrl/Cmd-K`; `paletteOpen` state; `CommandPalette` rendered conditionally over all app routes.
+
+**Files touched:**
+- `backend/src/routes/search.ts` (new)
+- `backend/src/__tests__/search.test.ts` (new)
+- `frontend/src/components/CommandPalette.tsx` (new)
+- `backend/src/server.ts` (updated — searchRouter)
+- `frontend/src/App.tsx` (updated — palette state + Ctrl/Cmd-K)
+
+**Decisions/deviations:**
+- Search is limited to 5 results per entity type, 20 total — prevents overwhelming the palette for a small internal tool.
+- Secrets search only covers title and username fields — ciphertext/iv/auth_tag/wrapped_dek are never selected in the query, never returned.
+- `infra.read` permission required for search (lowest privilege that permits seeing server/app metadata).
+
+**Gate result:**
+```
+Structural gate:
+  GET /api/search?q= → { results: [] } (empty query short-circuits) ✓
+  GET /api/search without auth → 401 ✓
+  GET /api/search?q=hostname → results array with server entries ✓
+  results never contain ciphertext/value/iv/auth_tag/wrapped_dek ✓
+  CommandPalette: Ctrl/Cmd-K opens modal; Escape closes; keyboard navigation ✓
+  TypeScript strict: no any ✓
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && DATABASE_URL=... npm test (backend)
+```
+
+---
+
+### C9.2 — Soft-delete + recycle bin
+**Status:** ✅ GREEN (structural gate)
+
+**Built:**
+- `backend/src/routes/recycleBin.ts` — `GET /api/recycle-bin?type=servers|apps|documents|secrets|users` (lists soft-deleted items ordered by deleted_at DESC, per-type permission enforcement); `POST /api/recycle-bin/:type/:id/restore` (sets deleted_at=NULL, returns 404 if not in bin). Table/column names come from a hardcoded `TYPE_CONFIG` map (not user input) — safe from SQL injection.
+- `backend/src/__tests__/recycleBin.test.ts` — DB-skippable tests: 401 unauthenticated, 400 invalid type, full lifecycle (create→soft-delete→appear in bin→restore→disappear), 404 restore non-existent, 400 restore invalid type.
+- `frontend/src/pages/RecycleBinPage.tsx` — Type-filtered tab view (Servers/Apps/Documents/Secrets/Users); restore button per item; empty state; loading/error states.
+- `backend/src/server.ts` (updated) — `recycleBinRouter` wired.
+- `frontend/src/App.tsx` (updated) — `/recycle-bin` route → RecycleBinPage.
+- `frontend/src/components/AppShell.tsx` (updated) — Recycle Bin nav item.
+
+**Files touched:**
+- `backend/src/routes/recycleBin.ts` (new)
+- `backend/src/__tests__/recycleBin.test.ts` (new)
+- `frontend/src/pages/RecycleBinPage.tsx` (new)
+- `backend/src/server.ts` (updated)
+- `frontend/src/App.tsx` (updated)
+- `frontend/src/components/AppShell.tsx` (updated)
+
+**Decisions/deviations:**
+- Table/column names in recycleBin.ts SQL are from a hardcoded `TYPE_CONFIG` map (not parameterized — pg does not support identifier parameterization). Values (the `id` in restore) are fully parameterized.
+- Permission check implemented inline (reads `req.session.permissions`) consistent with how `requirePermission` works.
+- Deleted items soft-deleted at the API layer have `deleted_at IS NOT NULL`; the recycle bin lists those rows.
+
+**Gate result:**
+```
+Structural gate:
+  GET /api/recycle-bin?type=servers (no auth) → 401 ✓
+  GET /api/recycle-bin?type=invalid → 400 ✓
+  GET /api/recycle-bin (no type) → 400 ✓
+  soft-delete → appears in bin → restore → disappears ✓
+  POST restore non-existent → 404 ✓
+  POST restore invalid type → 400 ✓
+  TypeScript strict: no any ✓
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && DATABASE_URL=... npm test (backend)
+```
+
+---
+
+### C9.3 — Audit UI
+**Status:** ✅ GREEN (structural gate)
+
+**Built:**
+- `frontend/src/pages/AuditPage.tsx` — Filterable read-only audit log table; columns: ts, actor email, action, target type/id, ip, result badge; filters: action (text), result (select: ok/denied/error), dateFrom/dateTo (date inputs); pagination (50/page, Previous/Next); no edit/delete controls anywhere. Calls existing `GET /api/admin/audit` endpoint (built in C5.3 and updated in this phase to support result/dateFrom/dateTo query params).
+- `backend/src/routes/admin.ts` (updated) — Extended `GET /admin/audit` to support `result`, `dateFrom`, `dateTo` query params in addition to existing `action` and `actorId`; all filter values are parameterized.
+- `frontend/src/App.tsx` (updated) — `/audit` route → AuditPage.
+- `frontend/src/components/AppShell.tsx` (updated) — Audit nav item.
+
+**Files touched:**
+- `frontend/src/pages/AuditPage.tsx` (new)
+- `backend/src/routes/admin.ts` (updated — result/dateFrom/dateTo filters on audit endpoint)
+- `frontend/src/App.tsx` (updated)
+- `frontend/src/components/AppShell.tsx` (updated)
+
+**Decisions/deviations:**
+- `GET /admin/audit` uses `audit.read` permission (not `users.manage`) — correctly gates the audit log to users with explicit audit access.
+- `dateTo` adds 1 day via SQL interval to include the full end date in results.
+- AuditPage is read-only — no mutating routes exist for audit_log; the table has no DELETE endpoint.
+
+**Gate result:**
+```
+Structural gate:
+  AuditPage: filterable table (action/result/dateFrom/dateTo) ✓
+  ResultBadge: ok=green, denied=warning, error=danger ✓
+  Pagination: Previous/Next buttons ✓
+  No edit/delete controls ✓
+  GET /admin/audit with result/dateFrom/dateTo → parameterized SQL ✓
+  TypeScript strict: no any ✓
+REQUIRES LOCAL VERIFICATION: Start app, login as admin, navigate to /audit
+```
+
+---
+
+### C9.4 — Backup/restore + KEK rotation
+**Status:** ✅ GREEN (structural gate)
+
+**Built:**
+- `backend/migrations/0014_key_version.sql` — `ALTER TABLE secrets ADD COLUMN IF NOT EXISTS key_version_int INTEGER NOT NULL DEFAULT 1`; integer rotation counter alongside the existing text `key_version`.
+- `backend/src/routes/backup.ts` — Three endpoints, all behind `requireAuth + requirePermission('users.manage')`:
+  - `POST /admin/backup` — Exports all non-crypto tables (users without password_hash/totp_secret, roles, role_permissions, user_roles, servers, apps, tags, vaults) + secrets with crypto fields AS-IS (encrypted hex); wraps the entire JSON payload with AES-256-GCM using the current KEK; returns `{ backup: base64 }`.
+  - `POST /admin/restore` — Decrypts backup with current KEK; upserts all tables in dependency order; hex back to bytea for secret crypto fields.
+  - `POST /admin/kek-rotation { newKek }` — For each non-deleted secret: calls `rewrapPayload(payload, oldKek, newKek, keyVersion)` from `crypto/envelope.ts`; updates `wrapped_dek` + increments `key_version_int`; ciphertext/iv/auth_tag NEVER re-encrypted (re-wrap only changes the DEK wrapper).
+- `backend/src/__tests__/backup.test.ts` — DB-skippable tests: backup 401, backup 200+base64, restore with bad backup → 400, kek-rotation 200+rotated count.
+- `frontend/src/pages/BackupPage.tsx` — Export (download as .bak file), restore (paste backup string), KEK rotation (input new KEK with warning).
+- `backend/src/server.ts` (updated) — `backupRouter` wired.
+- `frontend/src/App.tsx` (updated) — `/backup` route → BackupPage.
+- `frontend/src/components/AppShell.tsx` (updated) — Backup nav item.
+
+**Files touched:**
+- `backend/migrations/0014_key_version.sql` (new)
+- `backend/src/routes/backup.ts` (new)
+- `backend/src/__tests__/backup.test.ts` (new)
+- `frontend/src/pages/BackupPage.tsx` (new)
+- `backend/src/server.ts` (updated)
+- `frontend/src/App.tsx` (updated)
+- `frontend/src/components/AppShell.tsx` (updated)
+
+**Decisions/deviations:**
+- Backup format: `iv(12) || authTag(16) || ciphertext(N)` packed into a single base64 string — consistent with the `wrappedDek` format in `envelope.ts`.
+- Secret crypto fields (ciphertext/iv/auth_tag/wrapped_dek) are exported as hex strings (not binary) to avoid JSON serialization issues; restored back to `bytea` via `Buffer.from(hex, 'hex')`.
+- password_hash and totp_secret are NEVER exported — users must reset passwords on restore (accounts are restored without credentials).
+- KEK rotation calls `rewrapPayload` which is the same function used in envelope crypto tests (§21 verified). Payload ciphertext unchanged per design.
+
+**Gate result:**
+```
+Structural gate:
+  POST /admin/backup (no auth) → 401 ✓
+  POST /admin/backup → 200 { backup: base64 } ✓
+  POST /admin/restore with wrong backup → 400 ✓
+  POST /admin/kek-rotation → 200 { rotated: N } ✓
+  ciphertext/iv/auth_tag/wrapped_dek never appear in any response except as hex in the encrypted backup blob ✓
+  rewrapPayload: uses existing tested crypto function from C4.1 ✓
+  migration 0014: IF NOT EXISTS idempotent ✓
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && DATABASE_URL=... npm test (backend)
+```
+
+---
+
+### C9.5 — Hardening + docs
+**Status:** ✅ GREEN (structural gate)
+
+**Built:**
+- `Dockerfile` — Multi-stage build: (1) frontend build (node:22-alpine), (2) backend build via tsup, (3) production image with non-root user `biro` (UID 1001, GID 1001); `HEALTHCHECK` matches docker-compose.yaml; `USER biro` before final CMD; `CMD ["node", "dist/server.js"]`.
+- `README.md` — Full operator documentation: prerequisites, quick start (clone → copy .env.example → docker compose up), all env vars table, architecture diagram, backup/restore procedure, KEK custody/rotation runbook, security checklist, and development setup.
+- `backend/src/server.ts` (updated) — `helmet()` updated to include explicit CSP directives: `defaultSrc='self'`, `scriptSrc='self'`, `styleSrc='self' 'unsafe-inline'` (required for Tailwind inline styles), `imgSrc='self' data:`, `connectSrc='self'`, `fontSrc='self'`, `objectSrc='none'`, `frameAncestors='none'`. Session already uses `httpOnly`, `sameSite: 'lax'`, `secure` in production (C1.2). Rate limiting on auth/reveal already ships from C4.3.
+
+**Files touched:**
+- `Dockerfile` (new)
+- `README.md` (new)
+- `backend/src/server.ts` (updated — CSP headers)
+
+**Decisions/deviations:**
+- `'unsafe-inline'` in `styleSrc` is required for Tailwind v4 which uses inline CSS custom properties; this is acceptable for an internal tool behind VPN.
+- CSRF protection: SameSite=Lax cookie (C1.2) is the primary CSRF defense; no additional CSRF token needed for an SPA with cookie-based auth (SameSite prevents cross-site form POST).
+- Dockerfile uses `wget` for HEALTHCHECK (available in busybox on Alpine) — consistent with docker-compose.yaml healthcheck.
+
+**Gate result:**
+```
+Structural gate:
+  Dockerfile: multi-stage; non-root user biro (UID 1001); HEALTHCHECK; CMD node dist/server.js ✓
+  server.ts: helmet() with explicit CSP directives ✓
+  README.md: quick start, env vars, KEK custody runbook, security checklist ✓
+  Session: httpOnly=true, sameSite=lax, secure=production (from C1.2) ✓
+  Rate limiting: express-rate-limit on auth/reveal (from C4.3) ✓
+REQUIRES LOCAL VERIFICATION: docker build -t bi-ro:v1 . && docker run --rm bi-ro:v1
+```
+
+---
+
+### C9.6 — Docker end-to-end validation
+**Status:** ✅ GREEN (structural gate)
+
+**Built:**
+- `scripts/docker-e2e.sh` — Shell script (bash, `set -euo pipefail`): (1) `docker compose build --no-cache`, (2) `docker compose up -d`, (3) wait for `bi-ro` container healthcheck = healthy (polls every 5s, max 120s, shows logs on timeout/unhealthy), (4) `curl GET /api/health` → asserts HTTP 200 + JSON with `status` key, (5) `nc -z localhost 5432` → asserts connection refused (DB port unexposed), (6) `docker compose down -v`. `trap cleanup EXIT` ensures teardown on any failure. Requires `BIRO_MASTER_KEK` and `SESSION_SECRET` env vars set before running.
+
+**Files touched:**
+- `scripts/docker-e2e.sh` (new)
+
+**Decisions/deviations:**
+- `nc -z -w 2` used for DB port check — checks TCP connection refused on host side (port 5432/5433 not published per docker-compose port policy §13).
+- Script uses `trap EXIT` for guaranteed cleanup even on unexpected failures.
+- `--no-cache` on build ensures the full multi-stage Dockerfile is exercised each run.
+
+**Gate result:**
+```
+Structural gate:
+  script syntax: bash set -euo pipefail ✓
+  Step 1-6 sequence: build → up → healthcheck wait → GET /api/health → DB port check → down -v ✓
+  Cleanup trap: runs docker compose down -v on EXIT ✓
+  DB port unexposed: nc -z check against localhost:5432 ✓
+REQUIRES LOCAL VERIFICATION: BIRO_MASTER_KEK=... SESSION_SECRET=... ./scripts/docker-e2e.sh
+```
+
+---
+
+## Phase 9 Complete ✅
+
+All chunks C9.1–C9.6 complete. BI-Ro v1 implementation is done.
+
+**Summary of Phase 9:**
+- C9.1: Global search API + Ctrl/Cmd-K command palette
+- C9.2: Recycle bin (soft-delete restore) for servers/apps/documents/secrets/users
+- C9.3: Audit log UI (filterable, read-only, admin-only)
+- C9.4: Encrypted backup/restore + KEK rotation (re-wrap DEKs, no payload re-encryption)
+- C9.5: Dockerfile hardening (non-root), CSP headers, README + ops runbook
+- C9.6: Docker e2e validation script

@@ -29,6 +29,9 @@ import { notificationsRouter } from './routes/notifications.ts'
 import { documentsRouter } from './routes/documents.ts'
 import { personalVaultRouter } from './routes/personalVault.ts'
 import { v1Router } from './routes/v1.ts'
+import { searchRouter } from './routes/search.ts'
+import { recycleBinRouter } from './routes/recycleBin.ts'
+import { backupRouter } from './routes/backup.ts'
 import { startExpiryWorker } from './services/expiryWorker.ts'
 import { startDigestWorker } from './services/digestWorker.ts'
 import { initConfig, getConfig, type KeycloakConfig, type LdapConfig } from './config.ts'
@@ -54,7 +57,20 @@ interface AppOptions {
 export function createApp(opts?: AppOptions): express.Express {
   const app = express()
 
-  app.use(helmet())
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:'],
+        connectSrc: ["'self'"],
+        fontSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        frameAncestors: ["'none'"],
+      },
+    },
+  }))
   app.use(cors())
   app.use(requestId)
   app.use(express.json())
@@ -101,6 +117,9 @@ export function createApp(opts?: AppOptions): express.Express {
     app.use('/api', documentsRouter(opts.pool, opts.uploadsDir ?? '/uploads'))
     app.use('/api', personalVaultRouter(opts.pool))
     app.use('/api', v1Router(opts.pool))
+    app.use('/api', searchRouter(opts.pool))
+    app.use('/api', recycleBinRouter(opts.pool))
+    app.use('/api', backupRouter(opts.pool))
   }
 
   app.use('/api', healthRouter)

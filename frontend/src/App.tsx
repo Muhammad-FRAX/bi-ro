@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { ThemeProvider } from './components/ThemeProvider.tsx'
 import { SetupPage } from './pages/SetupPage.tsx'
 import { LoginPage } from './pages/LoginPage.tsx'
@@ -13,6 +13,10 @@ import { VaultDetailPage } from './pages/VaultDetailPage.tsx'
 import { SecretDetailPage } from './pages/SecretDetailPage.tsx'
 import { NotificationsPage } from './pages/NotificationsPage.tsx'
 import { DocumentsPage } from './pages/DocumentsPage.tsx'
+import { RecycleBinPage } from './pages/RecycleBinPage.tsx'
+import { AuditPage } from './pages/AuditPage.tsx'
+import { BackupPage } from './pages/BackupPage.tsx'
+import { CommandPalette } from './components/CommandPalette.tsx'
 import { api } from './lib/api.ts'
 
 type AppState = 'loading' | 'setup' | 'login' | 'app'
@@ -59,6 +63,7 @@ export default function App() {
   const [state, setState] = useState<AppState>('loading')
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null)
   const [appTitle] = useState('BI Root')
+  const [paletteOpen, setPaletteOpen] = useState(false)
 
   // Current page path (SPA routing without react-router)
   const [currentPath, setCurrentPath] = useState(() => window.location.pathname)
@@ -105,6 +110,21 @@ export default function App() {
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
+
+  // Ctrl/Cmd-K opens command palette (only when logged in)
+  const handleGlobalKeyDown = useCallback((e: KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+      e.preventDefault()
+      if (state === 'app') {
+        setPaletteOpen((open) => !open)
+      }
+    }
+  }, [state])
+
+  useEffect(() => {
+    window.addEventListener('keydown', handleGlobalKeyDown)
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+  }, [handleGlobalKeyDown])
 
   function handleSetupComplete() {
     setState('login')
@@ -156,9 +176,12 @@ export default function App() {
     onLogout: handleLogout,
   }
 
+  const palette = paletteOpen ? <CommandPalette onNavigate={navigate} onClose={() => setPaletteOpen(false)} /> : null
+
   if (currentPath === '/settings') {
     return (
       <ThemeProvider>
+        {palette}
         <SettingsPage {...sharedProps} />
       </ThemeProvider>
     )
@@ -167,6 +190,7 @@ export default function App() {
   if (currentPath === '/servers') {
     return (
       <ThemeProvider>
+        {palette}
         <ServersPage {...sharedProps} />
       </ThemeProvider>
     )
@@ -177,6 +201,7 @@ export default function App() {
   if (serverDetailMatch) {
     return (
       <ThemeProvider>
+        {palette}
         <ServerDetailPage serverId={serverDetailMatch[1]!} {...sharedProps} />
       </ThemeProvider>
     )
@@ -185,6 +210,7 @@ export default function App() {
   if (currentPath === '/apps') {
     return (
       <ThemeProvider>
+        {palette}
         <AppsPage {...sharedProps} />
       </ThemeProvider>
     )
@@ -193,6 +219,7 @@ export default function App() {
   if (currentPath === '/topology') {
     return (
       <ThemeProvider>
+        {palette}
         <TopologyPage {...sharedProps} />
       </ThemeProvider>
     )
@@ -201,6 +228,7 @@ export default function App() {
   if (currentPath === '/vault') {
     return (
       <ThemeProvider>
+        {palette}
         <VaultListPage {...sharedProps} />
       </ThemeProvider>
     )
@@ -211,6 +239,7 @@ export default function App() {
   if (vaultDetailMatch) {
     return (
       <ThemeProvider>
+        {palette}
         <VaultDetailPage vaultId={vaultDetailMatch[1]!} {...sharedProps} />
       </ThemeProvider>
     )
@@ -221,6 +250,7 @@ export default function App() {
   if (secretDetailMatch) {
     return (
       <ThemeProvider>
+        {palette}
         <SecretDetailPage secretId={secretDetailMatch[1]!} {...sharedProps} />
       </ThemeProvider>
     )
@@ -229,6 +259,7 @@ export default function App() {
   if (currentPath === '/notifications') {
     return (
       <ThemeProvider>
+        {palette}
         <NotificationsPage {...sharedProps} />
       </ThemeProvider>
     )
@@ -237,7 +268,35 @@ export default function App() {
   if (currentPath === '/documents') {
     return (
       <ThemeProvider>
+        {palette}
         <DocumentsPage {...sharedProps} />
+      </ThemeProvider>
+    )
+  }
+
+  if (currentPath === '/recycle-bin') {
+    return (
+      <ThemeProvider>
+        {palette}
+        <RecycleBinPage {...sharedProps} />
+      </ThemeProvider>
+    )
+  }
+
+  if (currentPath === '/audit') {
+    return (
+      <ThemeProvider>
+        {palette}
+        <AuditPage {...sharedProps} />
+      </ThemeProvider>
+    )
+  }
+
+  if (currentPath === '/backup') {
+    return (
+      <ThemeProvider>
+        {palette}
+        <BackupPage {...sharedProps} />
       </ThemeProvider>
     )
   }
@@ -245,6 +304,7 @@ export default function App() {
   // Default: Dashboard (handles /, and future pages)
   return (
     <ThemeProvider>
+      {palette}
       <DashboardPage {...sharedProps} />
     </ThemeProvider>
   )
