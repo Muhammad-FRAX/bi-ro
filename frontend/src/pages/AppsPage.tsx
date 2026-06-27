@@ -17,6 +17,8 @@ interface App {
   updatedAt: string
   vaultId: string | null
   vaultName: string | null
+  ownerId: string | null
+  canEdit: boolean
 }
 
 interface AppInstance {
@@ -130,10 +132,7 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
 
   const [revealTarget, setRevealTarget] = useState<{ id: string; title: string } | null>(null)
 
-  const canWrite = user.permissions.includes('servers.write')
   const canViewSecrets = user.permissions.includes('secrets.view')
-  const isAdmin = user.permissions.includes('users.manage')
-  const canManageVaultApps = canWrite || isAdmin
 
   const fetchApps = useCallback(async () => {
     setLoading(true)
@@ -151,11 +150,10 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
   useEffect(() => { void fetchApps() }, [fetchApps])
 
   useEffect(() => {
-    if (!canManageVaultApps) return
-    api.get<{ vaults: Vault[] }>('/vaults')
-      .then((d) => setVaults(d.vaults))
-      .catch(() => { /* non-fatal */ })
-  }, [canManageVaultApps])
+    api.get<Vault[]>('/vaults')
+      .then((d) => setVaults(Array.isArray(d) ? d : []))
+      .catch(() => { /* non-fatal — user may not have vault access */ })
+  }, [])
 
   async function loadInstances(appId: string) {
     if (instances[appId]) return
@@ -275,14 +273,12 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <h1 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: 'var(--text)' }}>Apps</h1>
-          {canWrite && (
-            <button
-              onClick={() => { setShowAddForm((v) => !v); setAddError(null) }}
-              style={{ height: 30, padding: '0 12px', background: 'var(--accent-soft)', border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)', color: 'var(--accent)', fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit' }}
-            >
-              {showAddForm ? 'Cancel' : '+ Add app'}
-            </button>
-          )}
+          <button
+            onClick={() => { setShowAddForm((v) => !v); setAddError(null) }}
+            style={{ height: 30, padding: '0 12px', background: 'var(--accent-soft)', border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)', color: 'var(--accent)', fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit' }}
+          >
+            {showAddForm ? 'Cancel' : '+ Add app'}
+          </button>
         </div>
 
         {/* Add form */}
@@ -309,7 +305,7 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
               <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
                 Docs URL<input name="docs_url" type="url" placeholder="https://…" style={INPUT} />
               </label>
-              {canManageVaultApps && vaults.length > 0 && (
+              {vaults.length > 0 && (
                 <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-muted)', gridColumn: '1 / -1' }}>
                   Vault (optional — assign to a vault to make it a shared team app)
                   <select value={addVaultId} onChange={(e) => setAddVaultId(e.target.value)} style={{ ...INPUT, height: 30 }}>
@@ -343,9 +339,7 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
           <div style={{ padding: '48px 0', textAlign: 'center' }}>
             <p style={{ margin: '0 0 4px', fontSize: 14, fontWeight: 500, color: 'var(--text)' }}>No apps yet.</p>
             <p style={{ margin: '0 0 16px', fontSize: 13, color: 'var(--text-muted)' }}>Add an app to track versions, EOL dates, and shared credentials.</p>
-            {canWrite && (
-              <button onClick={() => setShowAddForm(true)} style={{ height: 30, padding: '0 14px', background: 'var(--accent-soft)', border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)', color: 'var(--accent)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>+ Add app</button>
-            )}
+            <button onClick={() => setShowAddForm(true)} style={{ height: 30, padding: '0 14px', background: 'var(--accent-soft)', border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)', color: 'var(--accent)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>+ Add app</button>
           </div>
         ) : (
           <div style={{ background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
@@ -358,7 +352,7 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
                   <th style={TH}>Version</th>
                   <th style={TH}>EOL date</th>
                   <th style={TH}>Docs</th>
-                  {canWrite && <th style={TH} />}
+                  <th style={TH} />
                 </tr>
               </thead>
               <tbody>
@@ -390,22 +384,22 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
                           ? <a href={app.docsUrl} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ color: 'var(--accent)', fontSize: 12, textDecoration: 'none' }}>↗ link</a>
                           : <span style={{ color: 'var(--text-subtle)' }}>—</span>}
                       </td>
-                      {canWrite && (
-                        <td style={{ ...TD, textAlign: 'right' }} onClick={(e) => e.stopPropagation()}>
+                      <td style={{ ...TD, textAlign: 'right' }} onClick={(e) => e.stopPropagation()}>
+                        {app.canEdit && (
                           <button
                             onClick={() => { editingId === app.id ? setEditingId(null) : openEdit(app) }}
                             style={{ background: 'none', border: 'none', color: editingId === app.id ? 'var(--text-muted)' : 'var(--accent)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', padding: '2px 8px' }}
                           >
                             {editingId === app.id ? 'Cancel' : 'Edit'}
                           </button>
-                        </td>
-                      )}
+                        )}
+                      </td>
                     </tr>
 
                     {/* Edit form row */}
                     {editingId === app.id && (
                       <tr key={`${app.id}-edit`} style={{ borderBottom: '1px solid var(--border)', background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
-                        <td colSpan={canWrite ? 7 : 6} style={{ padding: '12px 14px' }}>
+                        <td colSpan={7} style={{ padding: '12px 14px' }}>
                           <form onSubmit={(e) => { void handleEdit(e) }} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                             <p style={{ margin: 0, fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>Edit app</p>
                             {editError && <p style={{ margin: 0, fontSize: 12, color: 'var(--danger)' }}>{editError}</p>}
@@ -438,7 +432,7 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
                                 Notes
                                 <input value={editDraft.notes ?? ''} onChange={(e) => setEditDraft((p) => ({ ...p, notes: e.target.value }))} placeholder="Any notes about this app" style={INPUT} />
                               </label>
-                              {canManageVaultApps && vaults.length > 0 && (
+                              {vaults.length > 0 && (
                                 <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', gridColumn: 'span 2' }}>
                                   Vault
                                   <select value={editDraft.vaultId ?? ''} onChange={(e) => setEditDraft((p) => ({ ...p, vaultId: e.target.value }))} style={{ ...INPUT, height: 30 }}>
@@ -462,7 +456,7 @@ export function AppsPage({ user, appTitle, onNavigate, onLogout }: AppsPageProps
                     {/* Expanded detail row */}
                     {expandedId === app.id && editingId !== app.id && (
                       <tr key={`${app.id}-expand`} style={{ borderBottom: '1px solid var(--border)' }}>
-                        <td colSpan={canWrite ? 7 : 6} style={{ padding: '12px 14px 16px', background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
+                        <td colSpan={7} style={{ padding: '12px 14px 16px', background: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
 
                             {app.notes && (

@@ -85,13 +85,20 @@ export function LoginPage({ onLogin, appTitle = 'BI Root' }: LoginPageProps) {
               padding: 32,
             }}
           >
-            <div style={{ marginBottom: 24 }}>
-              <h1 style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 600, color: 'var(--text)' }}>
-                Sign in
-              </h1>
-              <p style={{ margin: 0, fontSize: 13, color: 'var(--text-muted)' }}>
+            <div style={{ marginBottom: 28, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+              <img
+                src="/favicon.svg"
+                alt=""
+                width={52}
+                height={52}
+                style={{ marginBottom: 14 }}
+              />
+              <p style={{ margin: '0 0 4px', fontSize: 13, color: 'var(--text-muted)' }}>
                 {appTitle}
               </p>
+              <h1 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: 'var(--text)' }}>
+                Sign in
+              </h1>
             </div>
 
             <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>

@@ -216,7 +216,7 @@ export default function App() {
   }
 
   if (currentPath === '/apps') {
-    if (!has('infra.read', 'secrets.view')) { navigate('/'); return null }
+    // visible to all authenticated users — they see only their own apps + vault apps they belong to
     return (
       <ThemeProvider>
         {palette}

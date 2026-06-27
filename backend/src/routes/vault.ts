@@ -35,16 +35,16 @@ export function vaultRouter(pool: Pool): Router {
         const isAdmin = (req.session.permissions ?? []).includes('users.manage')
         const { rows } = await pool.query(
           isAdmin
-            ? `SELECT v.*, COUNT(vm.user_id) AS member_count
+            ? `SELECT v.*, COUNT(vm.user_id) AS member_count, 'manage'::text AS my_access
                FROM vaults v
                LEFT JOIN vault_members vm ON vm.vault_id = v.id
                GROUP BY v.id
                ORDER BY v.name`
-            : `SELECT v.*, COUNT(vm2.user_id) AS member_count
+            : `SELECT v.*, COUNT(vm2.user_id) AS member_count, vm.access AS my_access
                FROM vaults v
                JOIN vault_members vm ON vm.vault_id = v.id AND vm.user_id = $1
                LEFT JOIN vault_members vm2 ON vm2.vault_id = v.id
-               GROUP BY v.id
+               GROUP BY v.id, vm.access
                ORDER BY v.name`,
           isAdmin ? [] : [userId],
         )
