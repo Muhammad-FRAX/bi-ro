@@ -69,11 +69,14 @@ export function VaultDetailPage({ vaultId, user, appTitle, onNavigate, onLogout 
   const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'secrets' | 'members'>('secrets')
 
+  // Servers list (for server-link selector)
+  const [servers, setServers] = useState<{ id: string; hostname: string }[]>([])
+
   // New secret form
   const [showNew, setShowNew] = useState(false)
   const [newSecret, setNewSecret] = useState({
     title: '', type: 'generic', username: '', value: '',
-    hostUrl: '', rotationPeriodDays: '',
+    hostUrl: '', rotationPeriodDays: '', serverId: '',
   })
   const [creating, setCreating] = useState(false)
 
@@ -111,6 +114,12 @@ export function VaultDetailPage({ vaultId, user, appTitle, onNavigate, onLogout 
 
   useEffect(() => { void load() }, [vaultId])
 
+  useEffect(() => {
+    api.get<{ servers: { id: string; hostname: string }[] }>('/servers')
+      .then((d) => setServers(d.servers))
+      .catch(() => { /* non-fatal; selector stays empty */ })
+  }, [])
+
   async function handleCreateSecret(e: FormEvent) {
     e.preventDefault()
     if (!newSecret.title || !newSecret.value) return
@@ -124,8 +133,9 @@ export function VaultDetailPage({ vaultId, user, appTitle, onNavigate, onLogout 
         value: newSecret.value,
         hostUrl: newSecret.hostUrl || undefined,
         rotationPeriodDays: newSecret.rotationPeriodDays ? Number(newSecret.rotationPeriodDays) : undefined,
+        serverId: newSecret.serverId || undefined,
       })
-      setNewSecret({ title: '', type: 'generic', username: '', value: '', hostUrl: '', rotationPeriodDays: '' })
+      setNewSecret({ title: '', type: 'generic', username: '', value: '', hostUrl: '', rotationPeriodDays: '', serverId: '' })
       setShowNew(false)
       await load()
     } catch (err) {
@@ -269,6 +279,13 @@ export function VaultDetailPage({ vaultId, user, appTitle, onNavigate, onLogout 
                   <div>
                     <label style={{ fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 4 }}>Host / URL</label>
                     <input style={FIELD} value={newSecret.hostUrl} onChange={(e) => setNewSecret((p) => ({ ...p, hostUrl: e.target.value }))} placeholder="e.g. db-01:5432" />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 4 }}>Linked server</label>
+                    <select style={FIELD} value={newSecret.serverId} onChange={(e) => setNewSecret((p) => ({ ...p, serverId: e.target.value }))}>
+                      <option value="">— none —</option>
+                      {servers.map((s) => <option key={s.id} value={s.id}>{s.hostname}</option>)}
+                    </select>
                   </div>
                 </div>
 

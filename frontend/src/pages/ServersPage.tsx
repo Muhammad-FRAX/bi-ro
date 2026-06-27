@@ -174,8 +174,10 @@ export function ServersPage({ user, appTitle, onNavigate, onLogout }: ServersPag
     const os = (fd.get('os') as string).trim()
     const location = (fd.get('location') as string).trim()
     const notes = (fd.get('notes') as string).trim()
+    const ipsRaw = (fd.get('ips') as string).trim()
+    const ips = ipsRaw ? ipsRaw.split(',').map((ip) => ip.trim()).filter(Boolean) : []
     try {
-      await api.post('/servers', { hostname, environment, os: os || undefined, location: location || undefined, notes: notes || undefined })
+      await api.post('/servers', { hostname, environment, os: os || undefined, location: location || undefined, notes: notes || undefined, ips })
       setShowForm(false)
       void fetchServers()
     } catch (err) {
@@ -311,6 +313,10 @@ export function ServersPage({ user, appTitle, onNavigate, onLogout }: ServersPag
               <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
                 Location
                 <input name="location" placeholder="DC1 / AWS us-east-1" style={INPUT_STYLE} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-muted)' }}>
+                IP Addresses
+                <input name="ips" placeholder="192.168.1.1, 10.0.0.2" style={INPUT_STYLE} />
               </label>
               <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-muted)', gridColumn: '1 / -1' }}>
                 Notes

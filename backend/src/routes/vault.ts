@@ -386,6 +386,7 @@ export function vaultRouter(pool: Pool): Router {
           newValue,
           rotationPeriodDays,
           expiresAt,
+          serverId,
           reason,
         } = req.body as {
           title?: string
@@ -396,6 +397,7 @@ export function vaultRouter(pool: Pool): Router {
           newValue?: string
           rotationPeriodDays?: number
           expiresAt?: string
+          serverId?: string | null
           reason?: string
         }
 
@@ -420,6 +422,15 @@ export function vaultRouter(pool: Pool): Router {
           const kek = getConfig().kek
           const payload = encryptSecret(newValue, kek, 'v1')
 
+          const serverIdForUpdate = typeof serverId === 'string' && serverId.length > 0 ? serverId : null
+          const serverIdSet = serverIdForUpdate !== null ? `, server_id = $14::uuid` : ''
+          const rotateParams: unknown[] = [
+            req.params['id'],
+            payload.ciphertext, payload.iv, payload.authTag, payload.wrappedDek, payload.keyVersion,
+            title ?? null, username ?? null, hostUrl ?? null, logoUrl ?? null,
+            notes ?? null, rotationPeriodDays ?? null, expiresAt ?? null,
+          ]
+          if (serverIdForUpdate !== null) rotateParams.push(serverIdForUpdate)
           await pool.query(
             `UPDATE secrets SET
                ciphertext = $2, iv = $3, auth_tag = $4, wrapped_dek = $5, key_version = $6,
@@ -430,25 +441,19 @@ export function vaultRouter(pool: Pool): Router {
                logo_url = COALESCE($10, logo_url),
                notes = COALESCE($11, notes),
                rotation_period_days = COALESCE($12, rotation_period_days),
-               expires_at = COALESCE($13, expires_at)
+               expires_at = COALESCE($13, expires_at)${serverIdSet}
              WHERE id = $1`,
-            [
-              req.params['id'],
-              payload.ciphertext,
-              payload.iv,
-              payload.authTag,
-              payload.wrappedDek,
-              payload.keyVersion,
-              title ?? null,
-              username ?? null,
-              hostUrl ?? null,
-              logoUrl ?? null,
-              notes ?? null,
-              rotationPeriodDays ?? null,
-              expiresAt ?? null,
-            ],
+            rotateParams,
           )
         } else {
+          const serverIdForUpdate = typeof serverId === 'string' && serverId.length > 0 ? serverId : null
+          const serverIdSet = serverIdForUpdate !== null ? `, server_id = $9::uuid` : ''
+          const metaParams: unknown[] = [
+            req.params['id'],
+            title ?? null, username ?? null, hostUrl ?? null, logoUrl ?? null,
+            notes ?? null, rotationPeriodDays ?? null, expiresAt ?? null,
+          ]
+          if (serverIdForUpdate !== null) metaParams.push(serverIdForUpdate)
           await pool.query(
             `UPDATE secrets SET
                updated_at = now(),
@@ -458,18 +463,9 @@ export function vaultRouter(pool: Pool): Router {
                logo_url = COALESCE($5, logo_url),
                notes = COALESCE($6, notes),
                rotation_period_days = COALESCE($7, rotation_period_days),
-               expires_at = COALESCE($8, expires_at)
+               expires_at = COALESCE($8, expires_at)${serverIdSet}
              WHERE id = $1`,
-            [
-              req.params['id'],
-              title ?? null,
-              username ?? null,
-              hostUrl ?? null,
-              logoUrl ?? null,
-              notes ?? null,
-              rotationPeriodDays ?? null,
-              expiresAt ?? null,
-            ],
+            metaParams,
           )
         }
 

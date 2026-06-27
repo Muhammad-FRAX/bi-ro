@@ -108,6 +108,10 @@ export function ServerDetailPage({ serverId, user, appTitle, onNavigate, onLogou
   const canReveal = user.permissions.includes('secrets.reveal')
   const canViewSecrets = user.permissions.includes('secrets.view')
 
+  const [overviewEdit, setOverviewEdit] = useState(false)
+  const [overviewSubmitting, setOverviewSubmitting] = useState(false)
+  const [overviewError, setOverviewError] = useState<string | null>(null)
+
   const fetchAll = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -157,6 +161,32 @@ export function ServerDetailPage({ serverId, user, appTitle, onNavigate, onLogou
       // Viewer without secrets.view will get 403 — silently ignore
     } finally {
       setCredsLoading(false)
+    }
+  }
+
+  async function handleEditServer(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    setOverviewError(null)
+    setOverviewSubmitting(true)
+    const fd = new FormData(e.currentTarget)
+    const ipsRaw = (fd.get('ips') as string).trim()
+    const ips = ipsRaw ? ipsRaw.split(',').map((ip) => ip.trim()).filter(Boolean) : []
+    try {
+      await api.patch(`/servers/${serverId}`, {
+        hostname: (fd.get('hostname') as string).trim(),
+        environment: fd.get('environment') as string,
+        os: (fd.get('os') as string).trim() || null,
+        location: (fd.get('location') as string).trim() || null,
+        status: fd.get('status') as string,
+        notes: (fd.get('notes') as string).trim() || null,
+        ips,
+      })
+      setOverviewEdit(false)
+      void fetchAll()
+    } catch (err) {
+      setOverviewError(err instanceof ApiError ? err.message : 'Failed to update server')
+    } finally {
+      setOverviewSubmitting(false)
     }
   }
 
@@ -239,59 +269,133 @@ export function ServerDetailPage({ serverId, user, appTitle, onNavigate, onLogou
         {/* Overview tab */}
         {tab === 'overview' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div
-              style={{
-                background: 'var(--bg-elev)',
-                border: '1px solid var(--border)',
-                borderRadius: 'var(--radius)',
-                padding: 20,
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
-                gap: 16,
-              }}
-            >
-              <Field label="Hostname">
-                <span style={MONO}>{server.hostname}</span>
-              </Field>
-              <Field label="OS">{server.os ?? <span style={{ color: 'var(--text-subtle)' }}>—</span>}</Field>
-              <Field label="Location">{server.location ?? <span style={{ color: 'var(--text-subtle)' }}>—</span>}</Field>
-              {server.cpuRamDisk && (
-                <Field label="Specs">{server.cpuRamDisk}</Field>
-              )}
-              {server.ips.length > 0 && (
-                <Field label="IPs">
-                  {server.ips.map((ip) => <span key={ip} style={{ ...MONO, display: 'block' }}>{ip}</span>)}
-                </Field>
-              )}
-              {server.aliases.length > 0 && (
-                <Field label="Aliases">
-                  {server.aliases.map((a) => <span key={a} style={{ ...MONO, display: 'block' }}>{a}</span>)}
-                </Field>
-              )}
-              {server.tags.length > 0 && (
-                <Field label="Tags">
-                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                    {server.tags.map((t) => (
-                      <span
-                        key={t.id}
-                        style={{
-                          padding: '1px 6px', borderRadius: 4, fontSize: 11,
-                          color: t.color, background: `color-mix(in srgb, ${t.color} 12%, transparent)`,
-                          border: `1px solid color-mix(in srgb, ${t.color} 30%, transparent)`,
-                        }}
-                      >
-                        {t.name}
-                      </span>
-                    ))}
+            {overviewEdit ? (
+              <form
+                onSubmit={(e) => { void handleEditServer(e) }}
+                style={{ background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>Edit server</p>
+                  <button type="button" onClick={() => { setOverviewEdit(false); setOverviewError(null) }}
+                    style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>
+                    Cancel
+                  </button>
+                </div>
+                {overviewError && <p style={{ margin: 0, fontSize: 12, color: 'var(--danger)' }}>{overviewError}</p>}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10 }}>
+                  {(() => {
+                    const F: CSSProperties = { height: 28, padding: '0 8px', background: 'var(--bg-elev-2)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', color: 'var(--text)', fontSize: 12, fontFamily: 'inherit', outline: 'none' }
+                    const S: CSSProperties = { ...F, cursor: 'pointer' }
+                    return (
+                      <>
+                        <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)' }}>
+                          Hostname *
+                          <input name="hostname" required defaultValue={server.hostname} style={F} />
+                        </label>
+                        <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)' }}>
+                          Environment
+                          <select name="environment" defaultValue={server.environment} style={S}>
+                            {['prod', 'staging', 'dev', 'other'].map((o) => <option key={o} value={o}>{o}</option>)}
+                          </select>
+                        </label>
+                        <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)' }}>
+                          Status
+                          <select name="status" defaultValue={server.status} style={S}>
+                            {['active', 'maintenance', 'decommissioned'].map((o) => <option key={o} value={o}>{o}</option>)}
+                          </select>
+                        </label>
+                        <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)' }}>
+                          OS
+                          <input name="os" defaultValue={server.os ?? ''} placeholder="Ubuntu 22.04" style={F} />
+                        </label>
+                        <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)' }}>
+                          Location
+                          <input name="location" defaultValue={server.location ?? ''} placeholder="DC1 / AWS us-east-1" style={F} />
+                        </label>
+                        <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)' }}>
+                          IP Addresses
+                          <input name="ips" defaultValue={server.ips.join(', ')} placeholder="192.168.1.1, 10.0.0.2" style={F} />
+                        </label>
+                        <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', gridColumn: '1 / -1' }}>
+                          Notes
+                          <input name="notes" defaultValue={server.notes ?? ''} placeholder="Optional notes" style={F} />
+                        </label>
+                      </>
+                    )
+                  })()}
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  <button type="submit" disabled={overviewSubmitting}
+                    style={{ height: 28, padding: '0 14px', background: 'var(--accent)', border: 'none', borderRadius: 'var(--radius-sm)', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', opacity: overviewSubmitting ? 0.6 : 1 }}>
+                    {overviewSubmitting ? 'Saving…' : 'Save changes'}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <>
+                <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                  {canWrite && (
+                    <button onClick={() => setOverviewEdit(true)}
+                      style={{ height: 28, padding: '0 10px', background: 'var(--accent-soft)', border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)', color: 'var(--accent)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}>
+                      Edit server
+                    </button>
+                  )}
+                </div>
+                <div
+                  style={{
+                    background: 'var(--bg-elev)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius)',
+                    padding: 20,
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                    gap: 16,
+                  }}
+                >
+                  <Field label="Hostname">
+                    <span style={MONO}>{server.hostname}</span>
+                  </Field>
+                  <Field label="OS">{server.os ?? <span style={{ color: 'var(--text-subtle)' }}>—</span>}</Field>
+                  <Field label="Location">{server.location ?? <span style={{ color: 'var(--text-subtle)' }}>—</span>}</Field>
+                  {server.cpuRamDisk && (
+                    <Field label="Specs">{server.cpuRamDisk}</Field>
+                  )}
+                  <Field label="IPs">
+                    {server.ips.length > 0
+                      ? server.ips.map((ip) => <span key={ip} style={{ ...MONO, display: 'block' }}>{ip}</span>)
+                      : <span style={{ color: 'var(--text-subtle)' }}>—</span>}
+                  </Field>
+                  {server.aliases.length > 0 && (
+                    <Field label="Aliases">
+                      {server.aliases.map((a) => <span key={a} style={{ ...MONO, display: 'block' }}>{a}</span>)}
+                    </Field>
+                  )}
+                  {server.tags.length > 0 && (
+                    <Field label="Tags">
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {server.tags.map((t) => (
+                          <span
+                            key={t.id}
+                            style={{
+                              padding: '1px 6px', borderRadius: 4, fontSize: 11,
+                              color: t.color, background: `color-mix(in srgb, ${t.color} 12%, transparent)`,
+                              border: `1px solid color-mix(in srgb, ${t.color} 30%, transparent)`,
+                            }}
+                          >
+                            {t.name}
+                          </span>
+                        ))}
+                      </div>
+                    </Field>
+                  )}
+                </div>
+                {server.notes && (
+                  <div style={{ background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: '16px 20px' }}>
+                    <p style={{ ...FIELD_LABEL, marginBottom: 6 }}>Notes</p>
+                    <p style={{ margin: 0, fontSize: 13, color: 'var(--text)', whiteSpace: 'pre-wrap' }}>{server.notes}</p>
                   </div>
-                </Field>
-              )}
-            </div>
-            {server.notes && (
-              <div style={{ background: 'var(--bg-elev)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: '16px 20px' }}>
-                <p style={{ ...FIELD_LABEL, marginBottom: 6 }}>Notes</p>
-                <p style={{ margin: 0, fontSize: 13, color: 'var(--text)', whiteSpace: 'pre-wrap' }}>{server.notes}</p>
-              </div>
+                )}
+              </>
             )}
           </div>
         )}
@@ -671,6 +775,9 @@ function PortsTab({ serverId, ports, instances, canWrite, onRefresh }: PortsTabP
   const [showForm, setShowForm] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [editPortId, setEditPortId] = useState<string | null>(null)
+  const [editPortSubmitting, setEditPortSubmitting] = useState(false)
+  const [editPortError, setEditPortError] = useState<string | null>(null)
 
   const INPUT: CSSProperties = {
     height: 28, padding: '0 8px', background: 'var(--bg-elev-2)', border: '1px solid var(--border)',
@@ -705,8 +812,28 @@ function PortsTab({ serverId, ports, instances, canWrite, onRefresh }: PortsTabP
     try { await api.delete(`/ports/${portId}`); onRefresh() } catch { /* handled by refresh */ }
   }
 
+  async function handleEditPort(e: FormEvent<HTMLFormElement>, portId: string) {
+    e.preventDefault()
+    setEditPortError(null)
+    setEditPortSubmitting(true)
+    const fd = new FormData(e.currentTarget)
+    try {
+      await api.patch(`/ports/${portId}`, {
+        appLabel: (fd.get('appLabel') as string).trim() || null,
+        exposure: fd.get('exposure') as string,
+        description: (fd.get('description') as string).trim() || null,
+      })
+      setEditPortId(null)
+      onRefresh()
+    } catch (err) {
+      setEditPortError(err instanceof ApiError ? err.message : 'Failed to update port')
+    } finally {
+      setEditPortSubmitting(false)
+    }
+  }
+
   const TR: CSSProperties = { height: 34, borderBottom: '1px solid var(--border)' }
-  const TD: CSSProperties = { padding: '0 10px', fontSize: 13, color: 'var(--text)' }
+  const TD: CSSProperties = { padding: '0 10px', fontSize: 13, color: 'var(--text)', textAlign: 'left' }
   const TH: CSSProperties = { ...TD, fontSize: 11, color: 'var(--text-subtle)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600 }
 
   return (
@@ -801,23 +928,67 @@ function PortsTab({ serverId, ports, instances, canWrite, onRefresh }: PortsTabP
             </thead>
             <tbody>
               {ports.map((p) => (
-                <tr key={p.id} style={TR}>
-                  <td style={{ ...TD, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums', color: 'var(--accent)' }}>{p.number}</td>
-                  <td style={{ ...TD, color: 'var(--text-muted)' }}>{p.protocol}</td>
-                  <td style={TD}>{p.appName ?? p.appLabel ?? <span style={{ color: 'var(--text-subtle)' }}>—</span>}</td>
-                  <td style={TD}><ExposureBadge exposure={p.exposure} /></td>
-                  <td style={{ ...TD, color: 'var(--text-muted)' }}>{p.description ?? <span style={{ color: 'var(--text-subtle)' }}>—</span>}</td>
-                  {canWrite && (
-                    <td style={{ ...TD, textAlign: 'right' }}>
-                      <button
-                        onClick={() => { void handleDeletePort(p.id) }}
-                        style={{ background: 'none', border: 'none', color: 'var(--danger)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', padding: '2px 6px' }}
-                      >
-                        Remove
-                      </button>
-                    </td>
+                <Fragment key={p.id}>
+                  {editPortId === p.id ? (
+                    <tr style={{ background: 'color-mix(in srgb, var(--accent) 5%, transparent)', borderBottom: '1px solid var(--border)' }}>
+                      <td colSpan={canWrite ? 6 : 5} style={{ padding: '10px 12px' }}>
+                        <form onSubmit={(e) => { void handleEditPort(e, p.id) }} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'flex-end' }}>
+                          {editPortError && <p style={{ width: '100%', margin: 0, fontSize: 12, color: 'var(--danger)' }}>{editPortError}</p>}
+                          <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)' }}>
+                            App label
+                            <input name="appLabel" defaultValue={p.appLabel ?? ''} style={{ ...INPUT, width: 130 }} />
+                          </label>
+                          <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)' }}>
+                            Exposure
+                            <select name="exposure" defaultValue={p.exposure} style={{ ...SELECT, width: 110 }}>
+                              <option value="internal">internal</option>
+                              <option value="external">external</option>
+                              <option value="localhost">localhost</option>
+                            </select>
+                          </label>
+                          <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11, color: 'var(--text-muted)', flex: 1, minWidth: 140 }}>
+                            Description
+                            <input name="description" defaultValue={p.description ?? ''} style={{ ...INPUT, width: '100%' }} />
+                          </label>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <button type="button" onClick={() => { setEditPortId(null); setEditPortError(null) }}
+                              style={{ height: 26, padding: '0 10px', background: 'none', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', color: 'var(--text-muted)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}>
+                              Cancel
+                            </button>
+                            <button type="submit" disabled={editPortSubmitting}
+                              style={{ height: 26, padding: '0 10px', background: 'var(--accent)', border: 'none', borderRadius: 'var(--radius-sm)', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', opacity: editPortSubmitting ? 0.6 : 1 }}>
+                              {editPortSubmitting ? 'Saving…' : 'Save'}
+                            </button>
+                          </div>
+                        </form>
+                      </td>
+                    </tr>
+                  ) : (
+                    <tr style={TR}>
+                      <td style={{ ...TD, fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums', color: 'var(--accent)' }}>{p.number}</td>
+                      <td style={{ ...TD, color: 'var(--text-muted)' }}>{p.protocol}</td>
+                      <td style={TD}>{p.appName ?? p.appLabel ?? <span style={{ color: 'var(--text-subtle)' }}>—</span>}</td>
+                      <td style={TD}><ExposureBadge exposure={p.exposure} /></td>
+                      <td style={{ ...TD, color: 'var(--text-muted)' }}>{p.description ?? <span style={{ color: 'var(--text-subtle)' }}>—</span>}</td>
+                      {canWrite && (
+                        <td style={{ ...TD, textAlign: 'right' }}>
+                          <button
+                            onClick={() => { setEditPortId(p.id); setEditPortError(null) }}
+                            style={{ background: 'none', border: 'none', color: 'var(--accent)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', padding: '2px 6px' }}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => { void handleDeletePort(p.id) }}
+                            style={{ background: 'none', border: 'none', color: 'var(--danger)', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', padding: '2px 6px' }}
+                          >
+                            Remove
+                          </button>
+                        </td>
+                      )}
+                    </tr>
                   )}
-                </tr>
+                </Fragment>
               ))}
             </tbody>
           </table>

@@ -16,6 +16,7 @@ import { DocumentsPage } from './pages/DocumentsPage.tsx'
 import { RecycleBinPage } from './pages/RecycleBinPage.tsx'
 import { AuditPage } from './pages/AuditPage.tsx'
 import { BackupPage } from './pages/BackupPage.tsx'
+import { PersonalPage } from './pages/PersonalPage.tsx'
 import { CommandPalette } from './components/CommandPalette.tsx'
 import { api } from './lib/api.ts'
 
@@ -252,6 +253,15 @@ export default function App() {
       <ThemeProvider>
         {palette}
         <SecretDetailPage secretId={secretDetailMatch[1]!} {...sharedProps} />
+      </ThemeProvider>
+    )
+  }
+
+  if (currentPath === '/personal') {
+    return (
+      <ThemeProvider>
+        {palette}
+        <PersonalPage {...sharedProps} />
       </ThemeProvider>
     )
   }

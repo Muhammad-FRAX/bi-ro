@@ -354,7 +354,8 @@ export function DocumentsPage({ user, appTitle, onNavigate, onLogout }: Props) {
 
         <DataTable
           columns={columns}
-          data={docs}
+          rows={docs}
+          keyField="id"
           loading={loading}
           emptyMessage={
             <div style={{ textAlign: 'center', padding: '32px 0' }}>
