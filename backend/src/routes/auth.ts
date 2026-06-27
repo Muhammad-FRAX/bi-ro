@@ -1,8 +1,8 @@
 import { Router } from 'express'
 import type { Pool } from 'pg'
-import { authenticateSelf } from '../auth/self.ts'
+import type { AuthProvider } from '../auth/types.ts'
 
-export function authRouter(pool: Pool): Router {
+export function authRouter(pool: Pool, provider: AuthProvider): Router {
   const router = Router()
 
   router.post('/auth/login', async (req, res, next) => {
@@ -14,7 +14,7 @@ export function authRouter(pool: Pool): Router {
         return
       }
 
-      const identity = await authenticateSelf(pool, email, password)
+      const identity = await provider.authenticate({ email, password })
 
       if (!identity) {
         res.status(401).json({ error: 'Invalid credentials' })

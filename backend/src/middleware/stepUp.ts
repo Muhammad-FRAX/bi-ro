@@ -1,11 +1,10 @@
 import { Router } from 'express'
 import rateLimit from 'express-rate-limit'
 import type { Pool } from 'pg'
-import { authenticateSelf } from '../auth/self.ts'
+import type { AuthProvider } from '../auth/types.ts'
 import { decryptSecret } from '../crypto/envelope.ts'
 import { getConfig } from '../config.ts'
 import { requireAuth, requirePermission } from './rbac.ts'
-import { isMember } from '../routes/vault.ts'
 
 // Rate limiter for step-up / reveal: 5 attempts per 15 min per IP+user combo
 // §20 F3.1 — brute-force guard ships with P4
@@ -22,21 +21,7 @@ export const stepUpRateLimiter = rateLimit({
   legacyHeaders: false,
 })
 
-// Columns safe to return (never encrypted fields)
-const SECRET_META_COLS = `
-  s.id, s.vault_id, s.type, s.title, s.username, s.host_url, s.logo_url, s.notes,
-  s.key_version, s.rotation_period_days, s.expires_at, s.last_changed_at,
-  s.server_id, s.app_id, s.created_by, s.created_at, s.updated_at,
-  CASE
-    WHEN s.expires_at IS NOT NULL THEN
-      EXTRACT(EPOCH FROM (s.expires_at - now())) / 86400.0
-    WHEN s.rotation_period_days IS NOT NULL THEN
-      s.rotation_period_days - EXTRACT(EPOCH FROM (now() - s.last_changed_at)) / 86400.0
-    ELSE NULL
-  END AS days_remaining
-`
-
-export function revealRouter(pool: Pool): Router {
+export function revealRouter(pool: Pool, provider: AuthProvider): Router {
   const router = Router()
 
   // POST /secrets/:id/reveal
@@ -54,14 +39,17 @@ export function revealRouter(pool: Pool): Router {
       const ua = req.headers['user-agent'] ?? null
 
       try {
-        // 1. Step-up authentication (self mode: re-enter password)
+        // 1. Step-up authentication — delegated to AuthProvider (mode-agnostic)
         const { password } = req.body as { password?: string }
         if (!password) {
           return void res.status(400).json({ error: 'password is required for step-up' })
         }
 
-        const identity = await authenticateSelf(pool, req.session.email!, password)
-        if (!identity) {
+        const stepUpOk = await provider.stepUp(
+          { userId, email: req.session.email! },
+          { password },
+        )
+        if (!stepUpOk) {
           // Audit the denied attempt before returning
           await writeAudit(pool, {
             actorId: userId,
@@ -123,7 +111,7 @@ export function revealRouter(pool: Pool): Router {
             result: 'ok',
             detail: null,
           })
-        } catch (auditErr) {
+        } catch (_auditErr) {
           // Audit write failed — reveal is BLOCKED (fail-closed per §20 F2.1)
           return void res
             .status(500)

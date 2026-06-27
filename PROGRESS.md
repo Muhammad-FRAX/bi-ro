@@ -979,3 +979,59 @@ Structural gate (TypeScript reads):
   TypeScript strict: no any (explicit types throughout) ✓
   AppShell: /documents nav link already present (from prior session) ✓
 ```
+
+---
+
+## Phase 7 — Auth Modes + 2FA
+
+### C7.1 — AuthProvider refactor checkpoint
+**Status:** ✅ GREEN (structural gate)
+
+**Built:**
+- `backend/src/auth/types.ts` — added `AuthProvider` interface with `authenticate`, `stepUp`, `resolveRoles` methods.
+- `backend/src/auth/selfProvider.ts` — `SelfAuthProvider` class implementing `AuthProvider`; absorbs `authenticateSelf` + `resolvePermissions` from `self.ts`; `stepUp` delegates to `authenticate` (timing-safe); constructor takes `Pool`.
+- `backend/src/routes/auth.ts` — updated signature to `authRouter(pool, provider: AuthProvider)`; uses `provider.authenticate()` instead of importing `authenticateSelf` directly. No direct import of `auth/self.ts`.
+- `backend/src/middleware/stepUp.ts` — updated signature to `revealRouter(pool, provider: AuthProvider)`; uses `provider.stepUp()` instead of importing `authenticateSelf` directly. No direct import of `auth/self.ts`. Also removed unused `isMember` import.
+- `backend/src/server.ts` — imports `SelfAuthProvider`; creates `provider = new SelfAuthProvider(opts.pool)` inside `createApp`; passes it to `authRouter` and `revealRouter`.
+- `backend/src/routes/admin.ts` — added `GET /admin/settings/auth-mappings` and `PUT /admin/settings/auth-mappings` (requires `settings.manage`); stores group→role mapping JSON in the `settings` table (key `auth_mappings`); used by Keycloak/LDAP providers in C7.2/C7.3.
+- `backend/src/__tests__/auth.test.ts` — updated to pass `new SelfAuthProvider(pool)` to `authRouter`.
+- `backend/src/__tests__/authProvider.test.ts` — new 9-test suite: structural gate (no `authenticateSelf` in routes/middleware), interface method presence, and DB-gated integration tests for `authenticate`/`stepUp`/`resolveRoles`.
+
+**Files touched:**
+- `backend/src/auth/types.ts` (updated — `AuthProvider` interface added)
+- `backend/src/auth/selfProvider.ts` (new)
+- `backend/src/routes/auth.ts` (updated — provider param)
+- `backend/src/middleware/stepUp.ts` (updated — provider param, removed unused imports)
+- `backend/src/server.ts` (updated — `SelfAuthProvider` wired)
+- `backend/src/routes/admin.ts` (updated — auth-mappings endpoints)
+- `backend/src/__tests__/auth.test.ts` (updated — provider passed)
+- `backend/src/__tests__/authProvider.test.ts` (new)
+
+**Decisions/deviations:**
+- `self.ts` kept (not deleted): `hashPassword` is still used by `admin.ts` (user creation) and test setup files. The important principle is that *routes and middleware* no longer call `authenticateSelf` directly — they all go through `AuthProvider`. `self.ts` is now an internal utility module.
+- `AuthProvider.resolveRoles(userId)` takes a `userId` string (not a full identity), because for Keycloak (C7.2) we need to map external groups → BI-Ro roles given the user's DB record, and for self mode we look up permissions from the DB by userId.
+- `pool` kept in `authRouter` signature: Keycloak provider (C7.2) will use it to provision/update users on first OIDC callback.
+- Auth-mappings default: `{ groups: {} }` — an empty mapping is the correct default for self mode (no external groups).
+
+**Gate result:**
+```
+Structural gate:
+  routes/auth.ts: no 'authenticateSelf' import ✓ (grep confirms 0 matches)
+  middleware/stepUp.ts: no 'authenticateSelf' import ✓ (grep confirms 0 matches)
+  SelfAuthProvider: implements authenticate/stepUp/resolveRoles ✓
+  server.ts: provider = new SelfAuthProvider(pool); passed to authRouter + revealRouter ✓
+  admin.ts: GET/PUT /admin/settings/auth-mappings wired ✓
+  auth.test.ts: updated to pass provider; all existing 12 C1.2 tests structurally intact ✓
+  authProvider.test.ts: 9 tests (3 structural + 6 DB-gated integration) ✓
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && DATABASE_URL=... npm test (backend)
+Self mode fully works through AuthProvider interface only ✓
+```
+
+---
+
+## ⚠️ BLOCKED: C7.2 and C7.3 require §18 Q3 to be answered
+
+§18 Q3 is still OPEN: "LDAP/Keycloak specifics — directory flavor (AD vs OpenLDAP), Keycloak realm + client details, and the exact group→role mapping you want seeded."
+
+Both C7.2 (Keycloak mode) and C7.3 (LDAP mode) explicitly say "Confirm Q3 details first."
+Per §19.0 rule 7, I must not guess directory specifics. Implementation is paused until the owner answers Q3.
