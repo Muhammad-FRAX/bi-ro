@@ -3,6 +3,7 @@ import request from 'supertest'
 import express from 'express'
 import pg from 'pg'
 import { hashPassword } from '../auth/self.ts'
+import { SelfAuthProvider } from '../auth/selfProvider.ts'
 import { runMigrations } from '../db/migrate.ts'
 import { createSessionMiddleware } from '../middleware/session.ts'
 import { requireAuth, requirePermission } from '../middleware/rbac.ts'
@@ -66,7 +67,7 @@ describe.skipIf(!DB_URL)('C1.2 self-auth + RBAC', () => {
     testApp = express()
     testApp.use(express.json())
     testApp.use(createSessionMiddleware({ secret: 'test-session-secret-32chars-minimum!' }))
-    testApp.use('/api', authRouter(pool))
+    testApp.use('/api', authRouter(pool, new SelfAuthProvider(pool)))
 
     // Test routes guarded by permission
     testApp.get(

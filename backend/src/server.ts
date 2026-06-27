@@ -10,6 +10,7 @@ import { requestId } from './middleware/requestId.ts'
 import { errorHandler } from './middleware/errorHandler.ts'
 import { createSessionMiddleware } from './middleware/session.ts'
 import { setupGuard } from './middleware/setupGuard.ts'
+import { SelfAuthProvider } from './auth/selfProvider.ts'
 import healthRouter from './routes/health.ts'
 import { authRouter } from './routes/auth.ts'
 import { setupRouter } from './routes/setup.ts'
@@ -53,6 +54,7 @@ export function createApp(opts?: AppOptions): express.Express {
   app.use(express.urlencoded({ extended: true }))
 
   if (opts) {
+    const provider = new SelfAuthProvider(opts.pool)
     app.use(createSessionMiddleware({ secret: opts.sessionSecret, secure: opts.secureCookie }))
     // Setup guard blocks all /api routes except /setup/* and /health until initialized
     app.use('/api', setupGuard(opts.pool))
@@ -61,7 +63,7 @@ export function createApp(opts?: AppOptions): express.Express {
       adminPassword: opts.adminPassword ?? '',
       authMode: opts.authMode ?? 'self',
     }))
-    app.use('/api', authRouter(opts.pool))
+    app.use('/api', authRouter(opts.pool, provider))
     app.use('/api', adminRouter(opts.pool))
     app.use('/api', serversRouter(opts.pool))
     app.use('/api', appsRouter(opts.pool))
@@ -69,7 +71,7 @@ export function createApp(opts?: AppOptions): express.Express {
     app.use('/api', topologyRouter(opts.pool))
     app.use('/api', fsRouter(opts.pool))
     app.use('/api', vaultRouter(opts.pool))
-    app.use('/api', revealRouter(opts.pool))
+    app.use('/api', revealRouter(opts.pool, provider))
     app.use('/api', notificationsRouter(opts.pool))
     app.use('/api', documentsRouter(opts.pool, opts.uploadsDir ?? '/uploads'))
   }

@@ -345,6 +345,56 @@ export function adminRouter(pool: Pool): Router {
     }
   })
 
+  // ── GET /api/admin/settings/auth-mappings — group→role mapping config ───────
+  // Used by Keycloak (C7.2) and LDAP (C7.3) providers to map external groups to BI-Ro roles.
+  // For self mode this returns an empty mapping. Requires settings.manage permission.
+  router.get(
+    '/admin/settings/auth-mappings',
+    requirePermission('settings.manage'),
+    async (_req, res, next) => {
+      try {
+        const { rows } = await pool.query<{ value: Record<string, unknown> }>(
+          `SELECT value FROM settings WHERE key = 'auth_mappings'`,
+        )
+        const mappings = rows[0]?.value ?? { groups: {} }
+        res.json({ mappings })
+      } catch (err) {
+        next(err)
+      }
+    },
+  )
+
+  // ── PUT /api/admin/settings/auth-mappings — save group→role mapping config ──
+  router.put(
+    '/admin/settings/auth-mappings',
+    requirePermission('settings.manage'),
+    async (req, res, next) => {
+      try {
+        const { groups } = req.body as { groups?: unknown }
+        if (!groups || typeof groups !== 'object' || Array.isArray(groups)) {
+          res.status(400).json({ error: 'groups must be an object mapping external group names to BI-Ro role names' })
+          return
+        }
+        // Validate all values are strings
+        for (const [key, val] of Object.entries(groups as Record<string, unknown>)) {
+          if (typeof key !== 'string' || typeof val !== 'string') {
+            res.status(400).json({ error: 'Each mapping entry must be { "groupName": "biroRoleName" }' })
+            return
+          }
+        }
+        const mappings = { groups }
+        await pool.query(
+          `INSERT INTO settings (key, value) VALUES ('auth_mappings', $1)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+          [JSON.stringify(mappings)],
+        )
+        res.json({ ok: true })
+      } catch (err) {
+        next(err)
+      }
+    },
+  )
+
   // ── GET /api/admin/audit — audit log (admin only, read-only) ─────────────
   router.get('/admin/audit', requirePermission('audit.read'), async (req, res, next) => {
     try {
