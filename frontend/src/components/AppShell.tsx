@@ -12,6 +12,8 @@ const NAV_ITEMS = [
   { label: 'Documents', href: '/documents' },
   { label: 'Notifications', href: '/notifications' },
   { label: 'Audit', href: '/audit' },
+  { label: 'Recycle Bin', href: '/recycle-bin' },
+  { label: 'Backup', href: '/backup' },
   { label: 'Settings', href: '/settings' },
 ]
 
