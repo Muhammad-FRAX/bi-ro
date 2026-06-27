@@ -96,13 +96,13 @@ describe.skipIf(!DB_URL)('reveal endpoint (C4.3)', () => {
     await pool.end()
   })
 
-  it('reveal requires re-authentication (self mode: password)', async () => {
+  it('reveal requires re-authentication (self mode: password or totpCode)', async () => {
     const res = await request(app)
       .post(`/api/secrets/${secretId}/reveal`)
       .set('Cookie', adminCookie)
-      .send({}) // no password
-    expect(res.status).toBe(400)
-    expect(res.body.error).toMatch(/password/)
+      .send({}) // no credentials provided — provider rejects, step-up fails
+    // Provider returns false (no password/totp) → 401 Re-authentication failed
+    expect(res.status).toBe(401)
   })
 
   it('wrong password returns 401 and does not return the value', async () => {

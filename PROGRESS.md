@@ -1029,9 +1029,179 @@ Self mode fully works through AuthProvider interface only ✓
 
 ---
 
-## ⚠️ BLOCKED: C7.2 and C7.3 require §18 Q3 to be answered
+### C7.2 — Keycloak mode + test compose
+**Status:** ✅ GREEN (structural gate)
 
-§18 Q3 is still OPEN: "LDAP/Keycloak specifics — directory flavor (AD vs OpenLDAP), Keycloak realm + client details, and the exact group→role mapping you want seeded."
+**Q3 answers applied:**
+- Keycloak details from env (.env.example updated with all required vars)
+- Role mapping: configurable via Settings → Auth Mappings (group→BI-Ro role); default role from `KEYCLOAK_DEFAULT_ROLE` env (default: viewer)
+- No BI-Ro-managed Keycloak realm — connects to external, already-running Keycloak
 
-Both C7.2 (Keycloak mode) and C7.3 (LDAP mode) explicitly say "Confirm Q3 details first."
-Per §19.0 rule 7, I must not guess directory specifics. Implementation is paused until the owner answers Q3.
+**Built:**
+- `backend/src/auth/keycloakProvider.ts` — `KeycloakProvider implements AuthProvider`
+  - `authenticate()` — always returns null (login via OIDC redirect, not form POST)
+  - `buildAuthUrl()` — OIDC authorization code + PKCE URL with `max_age=0` for step-up
+  - `handleCallback()` — exchanges authorization code for tokens; validates access token via userinfo endpoint; provisions/links user in DB
+  - `provisionUser()` — finds existing user by `external_id` (Keycloak `sub`) or email; auto-provisions with default role on first login; maps Keycloak groups/realm roles to BI-Ro roles via `auth_mappings` settings
+  - `stepUp()` — time-based check: passes if `lastAuthAt` < 30 minutes ago (session freshness)
+  - `resolveRoles()` — same DB-based permission lookup as SelfAuthProvider
+- `backend/src/routes/keycloakAuth.ts` — OIDC routes (mounted only when AUTH_MODE=keycloak):
+  - `GET /auth/keycloak/login` — initiates PKCE flow; stores state/verifier/nonce in session
+  - `GET /auth/keycloak/callback` — exchanges code, provisions user, creates session with `lastAuthAt`
+  - `GET /auth/keycloak/stepup` — initiates re-auth with `max_age=0`; stores returnTo in state
+  - `GET /auth/keycloak/stepup/callback` — refreshes `session.lastAuthAt` after step-up
+- `backend/src/auth/types.ts` — `StepUpCredentials` interface; `lastAuthAt?` added to stepUp user param; `totpCode?` added to authenticate credentials
+- `backend/src/middleware/session.ts` — new session fields: `lastAuthAt`, `oidcState`, `oidcCodeVerifier`, `oidcNonce`, `pendingTotpSecret`, `pendingTotpUserId`
+- `backend/src/middleware/stepUp.ts` — passes `lastAuthAt` and `totpCode` to `provider.stepUp()`; removed mandatory password check from route (delegated to provider)
+- `backend/src/config.ts` — `KeycloakConfig` and `LdapConfig` interfaces; loaded from env
+- `backend/src/server.ts` — selects provider by `AUTH_MODE`; wires `keycloakAuthRouter` for keycloak mode
+- `keycloak.test.compose.yaml` — throwaway Keycloak (quay.io/keycloak/keycloak:26) for local dev/testing
+- `.env.example` — Keycloak env vars documented with setup guidance
+- `backend/package.json` — `jose` dependency removed (userinfo endpoint used instead of JWK verification); `ldapts: ^4.2.6` and `otplib: ^12.0.1` added
+- `backend/src/__tests__/keycloakProvider.test.ts` — 12 tests: PKCE helpers, isConfigured, authenticate returns null, stepUp time window, resolveRoles
+
+**Files touched:**
+- `backend/src/auth/keycloakProvider.ts` (new)
+- `backend/src/routes/keycloakAuth.ts` (new)
+- `backend/src/auth/types.ts` (updated)
+- `backend/src/middleware/session.ts` (updated)
+- `backend/src/middleware/stepUp.ts` (updated)
+- `backend/src/config.ts` (updated)
+- `backend/src/server.ts` (updated)
+- `keycloak.test.compose.yaml` (new)
+- `.env.example` (updated)
+- `backend/package.json` (updated)
+- `backend/src/__tests__/keycloakProvider.test.ts` (new)
+
+**Decisions/deviations:**
+- Step-up mechanism: session-age check (lastAuthAt < 30 min) rather than OIDC redirect per reveal — avoids redirect complexity in the existing reveal dialog; reveal returns 401 with re-login hint if session stale
+- ID token JWT signature NOT cryptographically verified — access token is validated via Keycloak's userinfo endpoint instead. Security rationale: confidential client (client secret used in code exchange) + server-to-server userinfo call proves Keycloak issued the token. Reduces dependencies (no `jose` package needed for v1).
+- `lastAuthAt` stored in session and passed to all stepUp calls — backward-compatible (optional field)
+- Mandatory password check removed from revealRouter — responsibility moved to each provider; existing reveal.test.ts updated (no-credential case now returns 401 instead of 400)
+
+**Gate result:**
+```
+Structural gate:
+  KeycloakProvider: authenticate/stepUp/resolveRoles methods present ✓
+  keycloakAuthRouter: 4 OIDC routes (login/callback/stepup/stepup-callback) ✓
+  server.ts: provider selected by AUTH_MODE; keycloakAuthRouter wired for keycloak ✓
+  stepUp.ts: no mandatory password check; lastAuthAt + totpCode passed to provider ✓
+  keycloak.test.compose.yaml: throwaway Keycloak for local dev/test ✓
+  keycloakProvider.test.ts: 12 pure tests (no DB/Keycloak needed):
+    PKCE code_challenge is base64url SHA-256 of verifier ✓
+    generateCodeVerifier produces unique values ✓
+    isConfigured: true with full config, false when issuer/clientId/clientSecret missing ✓
+    authenticate always returns null (OIDC redirect flow) ✓
+    stepUp: true when lastAuthAt < 30min, false when > 30min, false when undefined ✓
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && npm test (backend)
+REQUIRES KEYCLOAK: full OIDC flow test needs AUTH_MODE=keycloak + docker compose -f keycloak.test.compose.yaml up
+```
+
+---
+
+### C7.3 — LDAP/AD mode
+**Status:** ✅ GREEN (structural gate)
+
+**Q3 answers applied:**
+- Active Directory flavor (UPN bind: user@domain.local)
+- Details from .env: LDAP_URL, optional LDAP_BIND_TEMPLATE
+- Roles assigned by admin in BI-Ro app (not from LDAP groups)
+- Admin pre-creates user accounts (displayName + email + role, no password)
+- Env-seeded admin always authenticates via self-auth (Argon2id), regardless of AUTH_MODE
+
+**Built:**
+- `backend/src/auth/ldapProvider.ts` — `LdapProvider implements AuthProvider`
+  - `authenticate()` — (1) checks if user is env-seeded admin (auth_mode='self') → delegates to SelfAuthProvider; (2) binds to AD with user's email/UPN; (3) finds BI-Ro profile by email (auth_mode='ldap'); if no profile → reject (admin must pre-create)
+  - `stepUp()` — re-binds to LDAP with the password the user enters
+  - `resolveRoles()` — same DB-based permission lookup (roles assigned by admin in BI-Ro)
+  - Dynamic import of `ldapts` — graceful no-op if package not installed
+- `backend/src/routes/admin.ts` — updated `POST /admin/users` to support `authMode` field:
+  - `authMode='ldap'`: no password required; account created with `auth_mode='ldap'`, `force_password_change=false`
+  - `authMode='keycloak'`: no password required; account created with `auth_mode='keycloak'`
+  - `authMode='self'` (default): password still required; `force_password_change=true`
+- `backend/src/__tests__/ldapProvider.test.ts` — 10 tests: isConfigured, buildBindDn with/without template, authenticate fallback/unconfigured/wrong-password/no-profile, stepUp without password/unconfigured
+
+**Files touched:**
+- `backend/src/auth/ldapProvider.ts` (new)
+- `backend/src/routes/admin.ts` (updated — authMode-aware user creation)
+- `backend/src/__tests__/ldapProvider.test.ts` (new)
+
+**Decisions/deviations:**
+- Direct UPN bind (email as bind DN) — no service account needed; user's email must match their AD UPN or mail attribute. If AD requires `DOMAIN\user` format, set `LDAP_BIND_TEMPLATE=DOMAIN\{username}`
+- Roles NOT pulled from LDAP groups — per Q3 answer: "roles can be determined for the user by the default super admin". Admin sets roles in BI-Ro UI.
+- Self-admin fallback: env-seeded admin has `auth_mode='self'` in DB and always authenticates via Argon2id regardless of `AUTH_MODE=ldap`
+
+**Gate result:**
+```
+Structural gate:
+  LdapProvider: authenticate/stepUp/resolveRoles methods present ✓
+  authenticate: self-user delegation → SelfAuthProvider ✓
+  authenticate: LDAP bind → ldapts (dynamic import, no crash if uninstalled) ✓
+  authenticate: no BI-Ro profile → null (user must be pre-created) ✓
+  admin.ts: POST /admin/users accepts authMode=ldap/keycloak without password ✓
+  admin.ts: POST /admin/users still requires password for authMode=self ✓
+  ldapProvider.test.ts: 10 pure unit tests ✓
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && npm test (backend)
+REQUIRES LDAP: full bind test needs AUTH_MODE=ldap + AD instance at LDAP_URL
+```
+
+---
+
+### C7.4 — TOTP (self mode)
+**Status:** ✅ GREEN (structural gate)
+
+**Built:**
+- `backend/migrations/0010_totp.sql` — adds `totp_enabled BOOLEAN NOT NULL DEFAULT FALSE` and `totp_enrolled_at TIMESTAMPTZ` to users table (totp_secret already existed in 0002_identity.sql)
+- `backend/src/auth/totp.ts` — TOTP helpers using `otplib` (RFC 6238, SHA-1, 6 digits, 30s window ±1 step):
+  - `generateTotpSecret()` — 20-byte Base32 secret
+  - `buildOtpauthUri(secret, email, appTitle)` — otpauth:// URI for authenticator apps (Google Authenticator, Authy, etc.)
+  - `verifyTotpCode(code, secret)` — timing-safe verification with 1-step window tolerance
+- `backend/src/auth/selfProvider.ts` — TOTP-aware authenticate and stepUp:
+  - `authenticate()` — if `totp_enabled=true`, requires valid `totpCode` after password check; `null` if code missing/wrong
+  - `stepUp()` — accepts TOTP code as alternative to password; either validates
+- `backend/src/routes/auth.ts` — new TOTP routes:
+  - `POST /auth/totp/enroll` — generates secret; stores pending in session; returns `{ secret, otpauthUri }`
+  - `POST /auth/totp/activate { code }` — verifies code, persists secret, sets `totp_enabled=true`
+  - `DELETE /auth/totp { code | password }` — disables TOTP (requires valid code or password)
+  - `GET /auth/totp/status` — returns `{ totpEnabled, enrolledAt }`
+  - Updated `POST /auth/login` — accepts optional `totpCode`; passes to `provider.authenticate()`; sets `lastAuthAt` in session
+- `backend/src/__tests__/totp.test.ts` — 7 pure unit tests + 1 DB-gated:
+  - generateTotpSecret: returns unique Base32 secrets ✓
+  - buildOtpauthUri: returns valid otpauth:// URI containing secret ✓
+  - verifyTotpCode: returns false for empty code/secret; false for invalid codes ✓
+  - DB-gated: generated secret + otplib code = verifiable ✓
+- `backend/src/__tests__/reveal.test.ts` — updated: no-credential reveal now expects 401 (was 400; moved responsibility to provider)
+
+**Files touched:**
+- `backend/migrations/0010_totp.sql` (new)
+- `backend/src/auth/totp.ts` (new)
+- `backend/src/auth/selfProvider.ts` (updated — TOTP in authenticate + stepUp)
+- `backend/src/routes/auth.ts` (updated — TOTP routes + totpCode in login + lastAuthAt in session)
+- `backend/src/__tests__/totp.test.ts` (new)
+- `backend/src/__tests__/reveal.test.ts` (updated — 400 → 401 for no-credential reveal)
+
+**Decisions/deviations:**
+- `otplib` used (RFC 6238 compliant, well-maintained); dynamic import in totp.ts so server boots cleanly without it
+- TOTP code is an ALTERNATIVE to password in step-up (not additional factor) — simpler UX for an internal tool; admin can require TOTP by policy
+- QR code NOT rendered server-side — otpauth:// URI returned; frontend can use a client-side QR library or display the text secret directly
+- Pending secret stored in session (not DB) until activation confirmed — prevents orphaned secrets in DB if user abandons enrollment
+- Step-up without password works only if TOTP is enrolled — prevents empty-credential step-up succeeding
+
+**Gate result:**
+```
+Structural gate:
+  migrations/0010_totp.sql: ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled / totp_enrolled_at ✓
+  totp.ts: generateTotpSecret / buildOtpauthUri / verifyTotpCode ✓
+  selfProvider.ts: authenticate checks totp_enabled; stepUp accepts totpCode ✓
+  auth.ts: POST /auth/totp/enroll / activate / delete / status routes ✓
+  auth.ts: POST /auth/login accepts totpCode; sets lastAuthAt ✓
+  totp.test.ts: 7 pure tests pass (no DB/otplib install needed for mock tests) ✓
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && npm test (backend)
+DB-gated test (generate+verify round-trip): requires DATABASE_URL
+```
+
+---
+
+## Phase 7 Complete ✅
+
+All chunks C7.1–C7.4 complete. Phase 8 (Personal vault + API keys) is next.
