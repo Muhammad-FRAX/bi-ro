@@ -5,6 +5,7 @@ declare global {
   namespace Express {
     interface Request {
       id: string
+      apiClientId?: string
     }
   }
 }

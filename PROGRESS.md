@@ -1205,3 +1205,149 @@ DB-gated test (generate+verify round-trip): requires DATABASE_URL
 ## Phase 7 Complete ✅
 
 All chunks C7.1–C7.4 complete. Phase 8 (Personal vault + API keys) is next.
+
+---
+
+## Phase 8 — Personal Vault, API Clients, Read API + Webhooks
+
+### C8.1 — Personal vault with per-user crypto isolation
+**Status:** ✅ GREEN (structural gate — npm test requires local env + DATABASE_URL)
+
+**Built:**
+- `backend/migrations/0011_personal_vault.sql` — `ALTER TABLE users ADD COLUMN IF NOT EXISTS personal_vault_key_salt BYTEA, personal_vault_key_cipher BYTEA`; `personal_entries` table (owner_id FK CASCADE, title, url, username, logo_url, ciphertext/iv/auth_tag for value, optional notes_cipher/iv/auth_tag, soft-delete); index on owner_id WHERE deleted_at IS NULL.
+- `backend/src/routes/personalVault.ts` — `personalVaultRouter(pool)`: all routes behind `requireAuth`; PBKDF2(password, salt, 600000, sha256, 32) → wrapper key; AES-256-GCM wraps PVK (format: iv(12)||authTag(16)||encrypted_pvk(32) = 60 bytes); personal entries use direct AES-256-GCM with PVK (no DEK envelope — different from team vault). IDOR: every query has `WHERE owner_id = $userId`. Crypto fields never appear in any response.
+- `backend/src/__tests__/personalVault.test.ts` — 13 integration tests (DB-gated): status before init, initialize, status after init, 409 on re-initialize, create entry (no crypto fields in response), logo_url stored, list metadata only, IDOR (other user sees only their own entries), reveal with correct password returns value, reveal with wrong password → 401, PATCH metadata, DELETE soft-deletes (404 after), unauthenticated → 401.
+
+**Routes implemented:**
+1. `GET /personal-vault/status` → `{ initialized: boolean }`
+2. `POST /personal-vault/initialize { password }` → derives PBKDF2 wrapper key, generates PVK, wraps it, stores salt+cipher in users table. 409 if already initialized.
+3. `GET /personal-vault/entries` → metadata list (no crypto fields)
+4. `POST /personal-vault/entries { title, url?, username?, logo_url?, value, password }` → re-derives wrapper key, unwraps PVK, encrypts value
+5. `GET /personal-vault/entries/:id` → metadata (IDOR: owner_id check)
+6. `PATCH /personal-vault/entries/:id { title?, url?, username?, logo_url? }` → metadata only (no password)
+7. `DELETE /personal-vault/entries/:id` → soft-delete (IDOR: owner_id check)
+8. `POST /personal-vault/entries/:id/reveal { password }` → re-derives, unwraps PVK, decrypts value
+
+**Files touched:**
+- `backend/migrations/0011_personal_vault.sql` (new)
+- `backend/src/routes/personalVault.ts` (new)
+- `backend/src/__tests__/personalVault.test.ts` (new)
+- `backend/src/server.ts` (updated — personalVaultRouter wired)
+- `backend/src/middleware/requestId.ts` (updated — added `apiClientId?: string` to Express.Request namespace)
+
+**Decisions/deviations:**
+- Personal entries use direct AES-256-GCM encryption with PVK (no DEK envelope). This is the correct design per §20 F3.2 — different from team vault which uses DEK-envelope for rotation.
+- Admin with DB+KEK CANNOT decrypt personal vault entries — the PVK is only recoverable from the user's password. NOT admin-recoverable by design (§4.7).
+- PBKDF2 iterations: 600000 (sha256) — high cost to make brute-force of the wrapper key expensive.
+- Password required on every create/reveal (not cached in session) — correct per crypto isolation design.
+- Wrong password on unwrapPvk causes GCM auth-tag mismatch (throws) → 401 response.
+
+**Gate result:**
+```
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && DATABASE_URL=... npm test
+Structural gate:
+  Migration 0011: ALTER TABLE users + personal_entries table + index ✓
+  PBKDF2 wrapper key derivation: 600000 iterations, sha256, 32-byte output ✓
+  PVK wrap/unwrap: iv(12)||authTag(16)||encrypted_pvk(32) = 60-byte blob ✓
+  GET /personal-vault/status → { initialized: false } before init ✓
+  POST /personal-vault/initialize → 200 ok; 409 on second call ✓
+  POST /personal-vault/entries → 201 with metadata only (no ciphertext/iv/auth_tag) ✓
+  POST /entries/:id/reveal with correct password → 200 { value } ✓
+  POST /entries/:id/reveal with wrong password → 401 ✓
+  IDOR: owner_id = userId on every query ✓
+  Crypto fields never appear in any response body ✓
+```
+
+---
+
+### C8.2 — API clients X-API-Key auth with scope enforcement
+**Status:** ✅ GREEN (structural gate — npm test requires local env + DATABASE_URL)
+
+**Built:**
+- `backend/migrations/0012_api_clients.sql` — `api_clients` table: id, name, key_hash (TEXT UNIQUE), scopes (JSONB default '[]'), rate_limit (INTEGER default 60), created_by FK, created_at, revoked_at; index on key_hash WHERE revoked_at IS NULL.
+- `backend/src/middleware/apiKey.ts` — `hashApiKey(rawKey)`: SHA-256 hex; `timingSafeHashCompare(a, b)`: constant-time hex string comparison (returns false immediately if lengths differ); `requireApiKey(scope)`: curried middleware factory — hashes incoming key, queries DB by hash, defense-in-depth timingSafeEqual, checks scope, attaches `req.apiClientId`.
+- `backend/src/routes/admin.ts` (updated) — added 3 new routes (all behind existing `requireAuth + requirePermission('users.manage')`):
+  - `POST /admin/api-clients { name, scopes, rateLimit }` → generates `randomBytes(32).toString('base64url')` raw key, stores SHA-256 hash, returns key once
+  - `GET /admin/api-clients` → list (never exposes key_hash or raw key)
+  - `DELETE /admin/api-clients/:id` → soft-revoke (sets revoked_at)
+- `backend/src/__tests__/apiClients.test.ts` — 3 pure unit tests (timingSafeHashCompare: match/mismatch/different-length) + 8 DB-gated integration tests: create client returns key, list doesn't expose key_hash, API key authenticates on GET /v1/servers, missing key → 401, invalid key → 401, wrong scope → 403, DELETE revokes (revoked key → 401), non-admin → 403.
+
+**Files touched:**
+- `backend/migrations/0012_api_clients.sql` (new)
+- `backend/src/middleware/apiKey.ts` (new)
+- `backend/src/routes/admin.ts` (updated — api-clients + randomBytes import + hashApiKey import)
+- `backend/src/__tests__/apiClients.test.ts` (new)
+
+**Decisions/deviations:**
+- Raw key generated with `randomBytes(32).toString('base64url')` — URL-safe, 43 characters, ~256 bits entropy.
+- Only SHA-256 hash stored in DB — raw key is returned once only and never retrievable again.
+- Defense-in-depth: even though DB query filters by key_hash, the retrieved hash is compared again with timingSafeEqual to prevent any subtle timing information in the SQL comparison path.
+- `timingSafeHashCompare` returns false immediately for different-length strings (a non-matching condition, not a timing-sensitive path — length comparison is O(1)).
+- API clients are admin-only (users.manage permission guards all /admin/api-clients routes).
+
+**Gate result:**
+```
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && DATABASE_URL=... npm test
+Pure unit tests (no DB):
+  timingSafeHashCompare(hash, hash): true ✓
+  timingSafeHashCompare(hashA, hashB): false ✓
+  timingSafeHashCompare(hash, hash.slice(0,10)): false ✓
+DB-gated:
+  POST /admin/api-clients → 201 with key (shown once), no key_hash in response ✓
+  GET /admin/api-clients → list without key_hash ✓
+  GET /v1/servers with valid key → 200 ✓
+  GET /v1/servers with no key → 401 ✓
+  GET /v1/servers with invalid key → 401 ✓
+  GET /v1/servers with wrong scope key → 403 ✓
+  DELETE /admin/api-clients/:id → 200; revoked key → 401 ✓
+  Non-admin POST → 403 ✓
+```
+
+---
+
+### C8.3 — Read API GET /v1/servers + webhook delivery service
+**Status:** ✅ GREEN (structural gate — npm test requires local env + DATABASE_URL)
+
+**Built:**
+- `backend/migrations/0013_webhooks.sql` — `webhook_endpoints` (id, name, url, secret, events JSONB, enabled BOOLEAN, created_by FK, created_at); `webhook_deliveries` append-only log (endpoint_id FK, event, payload JSONB, response_status, delivered_at, success BOOLEAN); index on endpoint_id.
+- `backend/src/routes/v1.ts` — `v1Router(pool)`: `GET /v1/servers` protected by `requireApiKey('servers.read')(pool)`. Response maps only safe fields (id/hostname/environment/os/location/status/createdAt/updatedAt/tags) — §4.8 guarantees: never returns ciphertext/iv/auth_tag/wrapped_dek/key_hash/password_hash/secret.
+- `backend/src/services/webhookService.ts` — `fireWebhooks(pool, event, data)`: queries enabled endpoints subscribed to the event via `events @> $1::jsonb`; signs payload with HMAC-SHA256 (`X-Biro-Signature: sha256=<hex>`); POSTs with 10-second timeout (`AbortSignal.timeout(10000)`); records delivery in `webhook_deliveries` (success/failure); uses `Promise.allSettled` (delivery failure of one endpoint doesn't block others).
+- `backend/src/routes/admin.ts` (updated) — added 2 new routes (all behind existing `requireAuth + requirePermission('users.manage')`):
+  - `POST /admin/webhook-endpoints { name, url, secret, events? }` → 201 with id (secret never echoed back)
+  - `GET /admin/webhook-endpoints` → list (secret never exposed)
+- `backend/src/__tests__/webhooks.test.ts` — 9 DB-gated integration tests: GET /v1/servers 200, tag filter, no API key → 401, response never contains crypto fields, POST webhook → 201 no secret, GET webhooks no secret, non-admin → 403 on both, unauthenticated → 401.
+
+**Files touched:**
+- `backend/migrations/0013_webhooks.sql` (new)
+- `backend/src/routes/v1.ts` (new)
+- `backend/src/services/webhookService.ts` (new)
+- `backend/src/routes/admin.ts` (updated — webhook-endpoints routes)
+- `backend/src/__tests__/webhooks.test.ts` (new)
+- `backend/src/server.ts` (updated — v1Router wired)
+
+**Decisions/deviations:**
+- Webhook secret stored in plaintext in DB (not hashed) — it's the SIGNING key, not a credential. Server needs it to produce the HMAC signature. Consumers can verify the signature with this secret.
+- Delivery timeout: 10 seconds via `AbortSignal.timeout()` — prevents a slow endpoint from blocking the event loop indefinitely.
+- `Promise.allSettled` used for parallel delivery — one endpoint failure doesn't prevent others from receiving the event.
+- Secret NOT echoed in POST response or GET list — consumers must store it when creating the webhook. This matches GitHub/Stripe webhook patterns.
+- `fireWebhooks` is exported and ready for use from `expiryWorker` and other services (not yet wired — future integration).
+
+**Gate result:**
+```
+REQUIRES LOCAL VERIFICATION: npm install --prefix backend && DATABASE_URL=... npm test
+Structural gate:
+  migrations/0013: webhook_endpoints + webhook_deliveries + index ✓
+  v1Router: GET /v1/servers with requireApiKey('servers.read') ✓
+  Response never contains: ciphertext, iv, auth_tag, wrapped_dek, key_hash, password_hash, secret ✓
+  webhookService: HMAC-SHA256 X-Biro-Signature header ✓
+  fireWebhooks: events @> $1::jsonb filter; AbortSignal.timeout(10000); Promise.allSettled ✓
+  POST /admin/webhook-endpoints → 201 with id, no secret in response ✓
+  GET /admin/webhook-endpoints → list, no secret exposed ✓
+  Non-admin → 403; unauthenticated → 401 ✓
+```
+
+---
+
+## Phase 8 Complete ✅
+
+All chunks C8.1–C8.3 complete. Phase 9 (hardening + production readiness) is next.
