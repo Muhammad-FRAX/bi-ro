@@ -1,11 +1,22 @@
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
+import { existsSync } from 'fs'
 import { runner } from 'node-pg-migrate'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
-const MIGRATIONS_DIR = join(__dirname, '..', '..', 'migrations')
+// Resolve the migrations directory across layouts:
+//  - dev (tsx):       src/db/migrate.ts  -> ../../migrations  (backend/migrations)
+//  - prod (bundled):  dist/server.js     -> ../migrations     (/app/migrations)
+const MIGRATIONS_DIR =
+  process.env.MIGRATIONS_DIR ??
+  [
+    join(__dirname, '..', '..', 'migrations'),
+    join(__dirname, '..', 'migrations'),
+    join(process.cwd(), 'migrations'),
+  ].find(existsSync) ??
+  join(__dirname, '..', '..', 'migrations')
 
 export async function runMigrations(databaseUrl: string): Promise<void> {
   await runner({

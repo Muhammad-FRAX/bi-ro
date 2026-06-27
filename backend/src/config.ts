@@ -19,6 +19,10 @@ export interface Config {
   readonly sessionSecret: string
   readonly port: number
   readonly nodeEnv: string
+  // Whether the session cookie carries the Secure flag (HTTPS-only). Default false
+  // so a plain-HTTP `docker compose up` is usable; set COOKIE_SECURE=true in
+  // production behind a TLS-terminating reverse proxy (§13).
+  readonly cookieSecure: boolean
   readonly appTitle: string
   readonly appAccent: string
   readonly adminEmail: string | undefined
@@ -70,6 +74,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   }
 
   const nodeEnv = env['NODE_ENV'] ?? 'development'
+  const cookieSecure = env['COOKIE_SECURE'] === 'true'
   const appTitle = env['APP_TITLE'] ?? 'BI Root'
   const appAccent = env['APP_ACCENT'] ?? '#a78bfa'
   const adminEmail = env['BIRO_ADMIN_EMAIL']
@@ -99,6 +104,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     sessionSecret,
     port,
     nodeEnv,
+    cookieSecure,
     appTitle,
     appAccent,
     adminEmail,

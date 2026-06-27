@@ -124,8 +124,15 @@ export function createApp(opts?: AppOptions): express.Express {
 
   app.use('/api', healthRouter)
 
-  // Static frontend — no-op in dev (dist doesn't exist yet); active in production build
-  const frontendDist = join(__dirname, '..', '..', 'frontend', 'dist')
+  // Static frontend — no-op in dev (dist doesn't exist yet); active in production build.
+  // Resolve across layouts: dev (src/server.ts -> ../../frontend/dist) and
+  // bundled prod (dist/server.js -> ../frontend/dist, i.e. /app/frontend/dist).
+  const frontendDist =
+    [
+      join(__dirname, '..', '..', 'frontend', 'dist'),
+      join(__dirname, '..', 'frontend', 'dist'),
+    ].find((p) => existsSync(join(p, 'index.html'))) ??
+    join(__dirname, '..', '..', 'frontend', 'dist')
   app.use(express.static(frontendDist))
 
   // SPA fallback: serve index.html for all non-API, non-file routes (client-side routing)
@@ -155,7 +162,7 @@ async function main(): Promise<void> {
   const app = createApp({
     pool: getPool(),
     sessionSecret: cfg.sessionSecret,
-    secureCookie: cfg.nodeEnv === 'production',
+    secureCookie: cfg.cookieSecure,
     adminEmail: cfg.adminEmail,
     adminPassword: cfg.adminPassword,
     authMode: cfg.authMode,
