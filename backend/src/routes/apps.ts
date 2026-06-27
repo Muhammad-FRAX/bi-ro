@@ -253,7 +253,14 @@ export function appsRouter(pool: Pool): Router {
         vault_id: string; vault_name: string
       }>(
         `SELECT s.id, s.title, s.type, s.username, s.host_url,
-                s.days_remaining, s.last_changed_at, s.vault_id, v.name AS vault_name
+                s.last_changed_at, s.vault_id, v.name AS vault_name,
+                CASE
+                  WHEN s.expires_at IS NOT NULL THEN
+                    EXTRACT(EPOCH FROM (s.expires_at - now())) / 86400.0
+                  WHEN s.rotation_period_days IS NOT NULL THEN
+                    s.rotation_period_days - EXTRACT(EPOCH FROM (now() - s.last_changed_at)) / 86400.0
+                  ELSE NULL
+                END AS days_remaining
          FROM secrets s
          JOIN vaults v ON v.id = s.vault_id
          JOIN vault_members vm ON vm.vault_id = s.vault_id AND vm.user_id = $2
