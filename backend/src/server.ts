@@ -27,6 +27,8 @@ import { vaultRouter } from './routes/vault.ts'
 import { revealRouter } from './middleware/stepUp.ts'
 import { notificationsRouter } from './routes/notifications.ts'
 import { documentsRouter } from './routes/documents.ts'
+import { personalVaultRouter } from './routes/personalVault.ts'
+import { v1Router } from './routes/v1.ts'
 import { startExpiryWorker } from './services/expiryWorker.ts'
 import { startDigestWorker } from './services/digestWorker.ts'
 import { initConfig, getConfig, type KeycloakConfig, type LdapConfig } from './config.ts'
@@ -97,6 +99,8 @@ export function createApp(opts?: AppOptions): express.Express {
     app.use('/api', revealRouter(opts.pool, provider))
     app.use('/api', notificationsRouter(opts.pool))
     app.use('/api', documentsRouter(opts.pool, opts.uploadsDir ?? '/uploads'))
+    app.use('/api', personalVaultRouter(opts.pool))
+    app.use('/api', v1Router(opts.pool))
   }
 
   app.use('/api', healthRouter)
